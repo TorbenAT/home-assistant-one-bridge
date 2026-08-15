@@ -1,0 +1,138 @@
+{
+  "title": "One Bridge",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Konfigurer One Bridge",
+        "description": "Forbind denne Home Assistant-installation til en ChatGPT GPT Action. Brug target til normale HACS-installationer; source er en avanceret release-kilderolle.",
+        "data": {
+          "role": "Installationsrolle",
+          "public_base_url": "Offentlig Home Assistant-URL",
+          "require_admin": "Kræv administrator",
+          "require_owner": "Kræv ejer"
+        },
+        "data_description": {
+          "role": "Brug target til normale installationer. Source kræver en lokal release-policy og er kun beregnet til den primære release-kilde.",
+          "public_base_url": "Offentlig HTTPS-origin for denne Home Assistant-instans uden path, query eller fragment.",
+          "require_admin": "Tillad kun Home Assistant-administratorer at bruge bridgen.",
+          "require_owner": "Kræv desuden Home Assistant-ejerkontoen."
+        }
+      },
+      "permissions": {
+        "title": "Vælg GPT-adgang",
+        "description": "Vælg et preset for, hvad GPT'en må tilgå. Home control er det anbefalede udgangspunkt. Custom lader dig vælge enkelte capabilities, som håndhæves på serveren.",
+        "data": {
+          "permission_preset": "Adgangspreset"
+        }
+      },
+      "capabilities": {
+        "title": "Vælg tilladte capabilities",
+        "description": "Kun valgte capabilities vises i operationskataloget og det genererede GPT Action-schema. Status/katalog beholdes altid. Apply tilføjes automatisk, når en valgt capability kan forberede ændringer.",
+        "data": {
+          "allowed_capabilities": "Tilladte capabilities"
+        }
+      },
+      "credentials": {
+        "title": "Færdiggør GPT Action-opsætning",
+        "description": "Kopiér OAuth-værdierne og GPT-opsætningen nedenfor. Det genererede client secret vises kun nu. Færdiggør denne skærm for at aktivere One Bridge, og konfigurer derefter GPT Action. GPT-editoren viser callback-URL'en; indsæt den bagefter under One Bridge-indstillinger, før OAuth-login kan bruges.\n\n**OAuth**\n\nClient ID: `{client_id}`\n\nClient Secret: `{client_secret}`\n\nAuthorization URL: `{authorization_url}`\n\nToken URL: `{token_url}`\n\nScope: `{scope}`\n\nCallback: `{callback_url}`\n\n**GPT Action-schema**\n\nSchema URL: `{schema_url}`\n\n**Tekstuelle instruktioner**\n\nInstructions URL: `{instructions_url}`\n\n**Kopivenlig opsætning**\n\nSetup-side: `{setup_url}`\n\nPrivacy Policy URL: `{privacy_url}`\n\nPreset: `{permission_preset}`\n\nCapabilities: `{capabilities}`\n\n```text\n{gpt_instructions}\n```",
+        "data": {
+          "confirm": "Jeg har kopieret OAuth- og GPT-opsætningen"
+        }
+      }
+    },
+    "error": {
+      "invalid_configuration": "URL'erne eller rollen er ugyldige.",
+      "invalid_permissions": "Det valgte adgangspreset eller capabilities er ikke gyldige for denne rolle.",
+      "secret_not_confirmed": "Kopiér OAuth- og GPT-opsætningen, og bekræft før du fortsætter."
+    },
+    "abort": {
+      "missing_pending_configuration": "Den midlertidige One Bridge-konfiguration gik tabt. Start opsætningen igen."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "One Bridge-opsætning og adgang",
+        "description": "Opdater callback, GPT-adgang og sikkerhedsindstillinger. Hvis kun callback-URL'en ændres, gemmes den direkte, når du trykker Send. Andre ændringer stages og vises på næste skærm før aktivering. Rotér kun OAuth client secret, når du er klar til at erstatte det i GPT Action.",
+        "data": {
+          "callback_url": "ChatGPT OAuth-callback-URL",
+          "permission_preset": "Adgangspreset",
+          "require_admin": "Kræv administrator",
+          "require_owner": "Kræv ejer",
+          "persistent_refresh_token": "Vedvarende Home Assistant-refresh-token",
+          "read_only_lockdown": "Lås til kun læsning",
+          "rotate_client_secret": "Generér et nyt OAuth client secret",
+          "internal_ws_url": "Intern WebSocket-URL (tom = Auto)",
+          "internal_ws_verify_ssl": "Verificer SSL for intern WebSocket"
+        },
+        "data_description": {
+          "callback_url": "Indsæt callback-URL'en, som GPT Action-editoren viser. En callback-only ændring gemmes direkte, når du trykker Send. Lad feltet være tomt, indtil editoren har givet dig URL'en.",
+          "permission_preset": "Styrer hvilke capabilities og operationer GPT'en må bruge.",
+          "require_admin": "Tillad kun Home Assistant-administratorer at bruge bridgen.",
+          "require_owner": "Kræv desuden Home Assistant-ejerkontoen.",
+          "read_only_lockdown": "Bloker prepare/apply-ændringer, men behold de tilladte read-operationer.",
+          "rotate_client_secret": "Genererer et nyt secret og viser det én gang på næste skærm. Det eksisterende secret forbliver aktivt, medmindre du bekræfter de stagede indstillinger.",
+          "internal_ws_url": "Valgfrit loopback-WebSocket-endpoint, der slutter med /api/websocket; lad feltet være tomt for Auto.",
+          "internal_ws_verify_ssl": "Verificer TLS-certifikater, når den interne WebSocket bruger wss://."
+        }
+      },
+      "capabilities": {
+        "title": "Vælg tilladte capabilities",
+        "description": "Vælg de præcise server-håndhævede capabilities til denne GPT. Status/katalog beholdes altid, og apply tilføjes automatisk, når valgte write-capabilities kræver det.",
+        "data": {
+          "allowed_capabilities": "Tilladte capabilities"
+        }
+      },
+      "setup": {
+        "title": "Opdateret GPT-opsætning",
+        "description": "Disse indstillinger er staged og er endnu ikke aktive. Gennemgå værdierne nedenfor. Hvis et nyt client secret vises, så kopiér det før bekræftelse; det gamle secret forbliver aktivt, hvis du forlader flowet. Bekræftelse aktiverer de stagede indstillinger. Hvis permissions er ændret, så importér den stabile Schema URL igen, så GPT-editoren får den nye operationsliste.\n\n**OAuth**\n\nClient ID: `{client_id}`\n\nClient Secret: `{client_secret}`\n\nAuthorization URL: `{authorization_url}`\n\nToken URL: `{token_url}`\n\nScope: `{scope}`\n\nCallback URL: `{callback_url}`\n\n**GPT Action-schema**\n\nSchema URL: `{schema_url}`\n\n**Tekstuelle instruktioner**\n\nInstructions URL: `{instructions_url}`\n\n**Kopivenlig opsætning**\n\nSetup-side: `{setup_url}`\n\nPrivacy Policy URL: `{privacy_url}`\n\nPreset: `{permission_preset}`\n\nCapabilities: `{capabilities}`\n\n```text\n{gpt_instructions}\n```",
+        "data": {
+          "confirm": "Anvend disse indstillinger"
+        }
+      }
+    },
+    "error": {
+      "invalid_options": "En eller flere callback-, permission- eller avancerede indstillinger er ugyldige.",
+      "invalid_permissions": "De valgte capabilities er ikke gyldige for denne rolle.",
+      "setup_not_confirmed": "Gennemgå den opdaterede GPT-opsætning, før du lukker indstillingerne."
+    },
+    "abort": {
+      "invalid_saved_configuration": "Den gemte One Bridge-konfiguration bestod ikke validering og blev ikke aktiveret.",
+      "missing_pending_configuration": "One Bridge-konfigurationen kunne ikke indlæses."
+    }
+  },
+  "selector": {
+    "permission_preset": {
+      "options": {
+        "minimal": "Minimal læseadgang",
+        "home_control": "Home control (anbefalet)",
+        "read_only": "Alle read-only-områder",
+        "advanced": "Avanceret - alle capabilities for rollen",
+        "custom": "Tilpasset"
+      }
+    },
+    "capability": {
+      "options": {
+        "status_read": "Bridge-status og operationskatalog",
+        "audit_read": "Auditlog",
+        "files_read": "Filer - læs",
+        "files_write": "Filer - forbered ændringer",
+        "control_read": "Home Assistant states, historik og konfiguration - læs",
+        "control_write": "Home Assistant services og konfiguration - forbered ændringer",
+        "lovelace_read": "Dashboards - læs",
+        "lovelace_write": "Dashboards - forbered ændringer",
+        "registry_read": "Registries - læs",
+        "registry_write": "Registries - forbered ændringer",
+        "helpers_read": "Helpers - læs",
+        "helpers_write": "Helpers - forbered ændringer",
+        "backup_read": "Backups - læs",
+        "backup_write": "Backups - forbered ændringer",
+        "deployment_read": "Supervisor, opdateringer og deployment - læs",
+        "deployment_source": "Forbered source-release",
+        "deployment_target": "Forbered target-deployment",
+        "git_commit": "Forbered privat source Git-commit",
+        "mutation_apply": "Anvend bekræftede forberedte ændringer"
+      }
+    }
+  }
+}

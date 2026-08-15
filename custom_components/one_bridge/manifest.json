@@ -1,0 +1,23 @@
+{
+  "domain": "one_bridge",
+  "name": "One Bridge",
+  "after_dependencies": [
+    "frontend"
+  ],
+  "codeowners": [
+    "@TorbenAT"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "lovelace",
+    "persistent_notification",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/TorbenAT/home-assistant-one-bridge",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/TorbenAT/home-assistant-one-bridge/issues",
+  "single_config_entry": true,
+  "version": "0.9.0"
+}

@@ -1,0 +1,1855 @@
+{
+  "schema_version": "2.3.0",
+  "catalog_version": 2,
+  "public_routes": {
+    "dispatch": {
+      "path": "/api/one_bridge/v1/dispatch",
+      "modes": [
+        "read",
+        "prepare"
+      ],
+      "consequential": false
+    },
+    "apply": {
+      "path": "/api/one_bridge/v1/apply",
+      "modes": [
+        "apply"
+      ],
+      "consequential": true
+    }
+  },
+  "operations": [
+    {
+      "name": "system.status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Bridge, bootstrap, worker og transportstatus",
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "category": "system",
+      "capability": "status:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "system.catalog",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent operation catalog eller én operation",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "read",
+              "prepare",
+              "apply"
+            ]
+          },
+          "compact": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "category": "system",
+      "capability": "status:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "system.capabilities",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent versions- og capabilityoversigt",
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "category": "system",
+      "capability": "status:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "system.apply.status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Slå udfald op for et tidligere change.apply-kald",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "prepare_id": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "category": "system",
+      "capability": "status:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "system.prepare.status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Slå status op for en prepared mutation",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "prepare_id": {"type": "string"}
+        },
+        "required": ["prepare_id"],
+        "additionalProperties": false
+      },
+      "category": "system",
+      "capability": "status:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "system.audit.search",
+      "mode": "read",
+      "risk": 0,
+      "description": "Søg redigeret auditlog",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "additionalProperties": false
+      },
+      "category": "system",
+      "capability": "audit:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.entity.search",
+      "mode": "read",
+      "risk": 0,
+      "description": "Målrettet entity- og registry-søgning",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.calendar.events",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent kalenderbegivenheder i et afgrænset tidsinterval",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "entity_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^calendar\\..+$"
+            },
+            "minItems": 1,
+            "maxItems": 20
+          },
+          "start": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_ids",
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.state.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent aktuelle states",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "entity_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "include_attributes": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "entity_ids"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.history.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent kompakt Recorder-historik",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "entity_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 50
+          },
+          "start": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          },
+          "minimal": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "entity_ids",
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.statistics.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent langtidsstatistik",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "statistic_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "start": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          },
+          "period": {
+            "type": "string",
+            "enum": [
+              "5minute",
+              "hour",
+              "day",
+              "week",
+              "month"
+            ]
+          }
+        },
+        "required": [
+          "statistic_ids",
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.logbook.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent målrettet logbog",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "entity_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "start": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.template.render",
+      "mode": "read",
+      "risk": 0,
+      "description": "Render en Home Assistant-template",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string",
+            "maxLength": 20000
+          }
+        },
+        "required": [
+          "template"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.services.list",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent services og feltskemaer",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "compact": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.target.resolve",
+      "mode": "read",
+      "risk": 0,
+      "description": "Resolve entity, device, area, floor eller label",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object"
+          },
+          "allowed_domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.registry.list",
+      "mode": "read",
+      "risk": 0,
+      "description": "Liste registry entries",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "registry": {
+            "type": "string",
+            "enum": [
+              "entity",
+              "device",
+              "area",
+              "floor",
+              "label"
+            ]
+          },
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "required": [
+          "registry"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "registry:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.registry.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent én registry entry",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "registry": {
+            "type": "string",
+            "enum": [
+              "entity",
+              "device",
+              "area",
+              "floor",
+              "label"
+            ]
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "registry",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "registry:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.config_entries.list",
+      "mode": "read",
+      "risk": 0,
+      "description": "Liste config entries uden secrets",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.config_entries.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent redigeret config entry",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "entry_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.automation.traces",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent automation traces med redaction",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "entity_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        },
+        "required": [
+          "entity_id"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.dashboard.list",
+      "mode": "read",
+      "risk": 0,
+      "description": "Liste Lovelace dashboards",
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "lovelace:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.dashboard.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent dashboard og versionshash",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "url_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url_path"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "lovelace:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.logs.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent begrænsede Core, Supervisor, host eller app logs",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "core",
+              "supervisor",
+              "host",
+              "app"
+            ]
+          },
+          "app_slug": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "contains": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "esphome.config.validate",
+      "mode": "read",
+      "risk": 0,
+      "description": "Valider ESPHome-YAML syntaktisk uden at resolve secrets eller bygge firmware",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string",
+            "enum": [
+              "config"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^esphome/.+\\.ya?ml$"
+          }
+        },
+        "required": [
+          "root",
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "category": "esphome",
+      "capability": "files:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "esphome.device.status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Kontrollér udvalgte ESPHome-entiteters tilgængelighed efter separat firmware-flow",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "entity_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 30
+          },
+          "include_attributes": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "entity_ids"
+        ],
+        "additionalProperties": false
+      },
+      "category": "esphome",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "esphome.logs.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent begrænsede, filtrerede Core-loglinjer for et ESPHome-device",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "required": [
+          "device"
+        ],
+        "additionalProperties": false
+      },
+      "category": "esphome",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.supervisor.info",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent Core, Supervisor, OS og host info",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "core",
+                "supervisor",
+                "os",
+                "host"
+              ]
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.apps.list",
+      "mode": "read",
+      "risk": 0,
+      "description": "Liste installerede apps/add-ons",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "include_config": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.backups.list",
+      "mode": "read",
+      "risk": 0,
+      "description": "Liste backups",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "backup:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "ha.updates.list",
+      "mode": "read",
+      "risk": 0,
+      "description": "Liste tilgængelige opdateringer",
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "files.list",
+      "mode": "read",
+      "risk": 0,
+      "description": "Liste allowlistet filsti",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string",
+            "enum": [
+              "config",
+              "addon_configs",
+              "appdaemon",
+              "share"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          }
+        },
+        "required": [
+          "root",
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "category": "files",
+      "capability": "files:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "files.read",
+      "mode": "read",
+      "risk": 0,
+      "description": "Læs fil med hash og begrænsning",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string",
+            "enum": [
+              "config",
+              "addon_configs",
+              "appdaemon",
+              "share"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "end_line": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "root",
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "category": "files",
+      "capability": "files:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "files.search",
+      "mode": "read",
+      "risk": 0,
+      "description": "Søg i allowlistede roots",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "roots": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "config",
+                "addon_configs",
+                "appdaemon",
+                "share"
+              ]
+            }
+          },
+          "query": {
+            "type": "string"
+          },
+          "glob": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          }
+        },
+        "required": [
+          "roots",
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "category": "files",
+      "capability": "files:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "files.diff",
+      "mode": "read",
+      "risk": 0,
+      "description": "Beregn diff uden at skrive",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string",
+            "enum": [
+              "config",
+              "addon_configs",
+              "appdaemon",
+              "share"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "new_content": {
+            "type": "string"
+          },
+          "expected_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "path",
+          "new_content",
+          "expected_sha256"
+        ],
+        "additionalProperties": false
+      },
+      "category": "files",
+      "capability": "files:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "release.status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent bootstrap-, worker-, staged- og rollbackstatus",
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "category": "release",
+      "capability": "deployment:source",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "bootstrap.status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent redigeret source-, pending- og last-state for bootstrap maintenance",
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "deployment:source",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "bootstrap.stage",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Forbered bootstrap staging fra en konkret clean source-commit uden restart",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "expected_source_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        },
+        "required": [
+          "expected_source_commit"
+        ],
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "deployment:source",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "bootstrap.finalize",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Forbered post-restart finalisering af verificeret bootstrap-state uden restart",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "expected_source_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        },
+        "required": [
+          "expected_source_commit"
+        ],
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "deployment:source",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "git.area.status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent status for et fast allowlistet Git-omrade",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "area": {
+            "type": "string",
+            "enum": [
+              "bridge"
+            ]
+          }
+        },
+        "required": [
+          "area"
+        ],
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "git:commit",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "git.source.push",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Forbered fast non-force push af clean private source main til origin/main",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "expected_source_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        },
+        "required": [
+          "expected_source_commit"
+        ],
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "git:commit",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "git.release_candidate.publish",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Forbered fast non-force publicering af clean private source main til origin/next",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "expected_source_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        },
+        "required": ["expected_source_commit"],
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "git:commit",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "git.public.status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Læs public One Bridge main-historik og tags uden mutation",
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "git:commit",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "git.public.cleanup",
+      "mode": "prepare",
+      "risk": 3,
+      "description": "Forbered force-with-lease cleanup af public main til LICENSE-root plus én ren release-commit før første tag",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 64,
+            "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
+          },
+          "expected_source_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        },
+        "required": ["version", "expected_source_commit"],
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "git:commit",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "git.public.tag",
+      "mode": "prepare",
+      "risk": 3,
+      "description": "Forbered nyt finalt v<version>-tag på den verificerede rensede public main-commit",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 64,
+            "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
+          },
+          "expected_public_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        },
+        "required": ["version", "expected_public_commit"],
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "git:commit",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "git.preview.publish",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Forbered fast HACS preview-publicering af One Bridge uden final tag eller release",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 64,
+            "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "additionalProperties": false
+      },
+      "category": "deployment",
+      "capability": "git:commit",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.git_commit",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Forbered en commit i et fast allowlistet Git-omrade uden push",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "area": {
+            "type": "string",
+            "enum": [
+              "bridge"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 160,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9 .,:;()/_-]{7,159}$"
+          }
+        },
+        "required": [
+          "area",
+          "summary"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "git:commit",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.service",
+      "mode": "prepare",
+      "risk": 1,
+      "description": "Forbered typed Home Assistant servicekald",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "target": {
+            "type": "object"
+          },
+          "data": {
+            "type": "object"
+          },
+          "expected": {
+            "type": "object",
+            "properties": {
+              "entity_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50
+              },
+              "not_states": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 20
+              }
+            },
+            "additionalProperties": false
+          },
+          "verify": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "domain",
+          "service",
+          "target"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "control:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.sequence",
+      "mode": "prepare",
+      "risk": 1,
+      "description": "Forbered begrænset synkron sekvens",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "actions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "items": {
+              "type": "object"
+            }
+          },
+          "stop_on_error": {
+            "type": "boolean"
+          },
+          "verify_each": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "actions"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "control:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.file",
+      "mode": "prepare",
+      "risk": 1,
+      "description": "Forbered strict filændring med diff og hash",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string",
+            "enum": [
+              "config",
+              "addon_configs",
+              "appdaemon",
+              "share"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "new_content": {
+            "type": "string"
+          },
+          "expected_sha256": {
+            "type": "string"
+          },
+          "validation_profile": {
+            "type": "string",
+            "enum": [
+              "yaml",
+              "home_assistant_yaml",
+              "esphome_yaml"
+            ]
+          }
+        },
+        "required": [
+          "root",
+          "path",
+          "new_content",
+          "expected_sha256"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "files:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.file_patch",
+      "mode": "prepare",
+      "risk": 1,
+      "description": "Forbered eksakte linje-patches med filhash, diff og validering",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string",
+            "enum": [
+              "config",
+              "addon_configs",
+              "appdaemon",
+              "share"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "patches": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "properties": {
+                "start_line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "end_line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "old_content": {
+                  "type": "string"
+                },
+                "new_content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "start_line",
+                "end_line",
+                "old_content",
+                "new_content"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "validation_profile": {
+            "type": "string",
+            "enum": [
+              "yaml",
+              "home_assistant_yaml",
+              "esphome_yaml"
+            ]
+          }
+        },
+        "required": [
+          "root",
+          "path",
+          "expected_sha256",
+          "patches"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "files:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.registry",
+      "mode": "prepare",
+      "risk": 1,
+      "description": "Forbered registryændring",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "registry": {
+            "type": "string",
+            "enum": [
+              "entity",
+              "device",
+              "area",
+              "floor",
+              "label"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "changes": {
+            "type": "object"
+          },
+          "expected_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "registry",
+          "id",
+          "changes"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "registry:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.dashboard",
+      "mode": "prepare",
+      "risk": 1,
+      "description": "Forbered dashboardændring med versionshash",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "url_path": {
+            "type": "string"
+          },
+          "config": {
+            "type": "object"
+          },
+          "expected_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url_path",
+          "config",
+          "expected_sha256"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "lovelace:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.config_entry",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Forbered officiel config-entry handling",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "entry_id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "reload",
+              "enable",
+              "disable",
+              "reauth",
+              "reconfigure",
+              "options"
+            ]
+          },
+          "options": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "entry_id",
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "control:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.supervisor",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Forbered app, backup eller update handling",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "resource": {
+            "type": "string",
+            "enum": [
+              "app",
+              "backup",
+              "update"
+            ]
+          },
+          "action": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "options": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "resource",
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "control:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.prepare.core",
+      "mode": "prepare",
+      "risk": 3,
+      "description": "Forbered reload, restart eller stop af Core",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "check_config",
+              "reload",
+              "restart",
+              "stop"
+            ]
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "control:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "release.prepare",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Fetch, verify, test og stage allowlistet worker release",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "repository": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 300,
+            "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?/?$"
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "expected_active_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "force_retest": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repository",
+          "ref"
+        ],
+        "additionalProperties": false
+      },
+      "category": "release",
+      "capability": "deployment:source",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "change.apply",
+      "mode": "apply",
+      "risk": 2,
+      "description": "Anvend præcist server-genereret prepare-resultat",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "prepare_id": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 200
+          },
+          "expected_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "const": true
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "prepare_id",
+          "expected_digest",
+          "confirmed",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "mutation:apply",
+      "handler": "apply_request",
+      "external_route": "apply",
+      "permission": "admin"
+    },
+    {
+      "name": "release.apply",
+      "mode": "apply",
+      "risk": 3,
+      "description": "Aktivér staged worker med smoke test og rollback",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "prepare_id": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 200
+          },
+          "expected_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "const": true
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "prepare_id",
+          "expected_digest",
+          "confirmed",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
+      "category": "release",
+      "capability": "deployment:source",
+      "handler": "apply_request",
+      "external_route": "apply",
+      "permission": "admin"
+    }
+  ]
+}

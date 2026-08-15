@@ -1,0 +1,138 @@
+{
+  "title": "One Bridge",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure One Bridge",
+        "description": "Connect this Home Assistant installation to a ChatGPT GPT Action. Use target for normal HACS installations; source is an advanced release-source role.",
+        "data": {
+          "role": "Installation role",
+          "public_base_url": "Public Home Assistant URL",
+          "require_admin": "Require administrator",
+          "require_owner": "Require owner"
+        },
+        "data_description": {
+          "role": "Use target for normal installations. Source requires a local release policy and is intended for the primary release source only.",
+          "public_base_url": "Public HTTPS origin for this Home Assistant instance, without path, query, or fragment.",
+          "require_admin": "Only allow Home Assistant administrators to use the bridge.",
+          "require_owner": "Additionally require the Home Assistant owner account."
+        }
+      },
+      "permissions": {
+        "title": "Choose GPT access",
+        "description": "Choose a preset for what this GPT may access. Home control is the recommended starting point. Custom lets you choose individual server-enforced capabilities.",
+        "data": {
+          "permission_preset": "Access preset"
+        }
+      },
+      "capabilities": {
+        "title": "Choose allowed capabilities",
+        "description": "Only selected capabilities are exposed in the generated operation catalog and GPT Action schema. Status/catalog access is always retained. Apply is added automatically when a selected capability can prepare changes.",
+        "data": {
+          "allowed_capabilities": "Allowed capabilities"
+        }
+      },
+      "credentials": {
+        "title": "Complete GPT Action setup",
+        "description": "Copy the OAuth values and GPT setup information below. The generated client secret is shown only now. Complete this screen to activate One Bridge, then configure the GPT Action. The GPT editor will provide the callback URL; add it afterwards in One Bridge Options before OAuth sign-in.\n\n**OAuth**\n\nClient ID: `{client_id}`\n\nClient Secret: `{client_secret}`\n\nAuthorization URL: `{authorization_url}`\n\nToken URL: `{token_url}`\n\nScope: `{scope}`\n\nCallback: `{callback_url}`\n\n**GPT Action schema**\n\nSchema URL: `{schema_url}`\n\n**Text instructions**\n\nInstructions URL: `{instructions_url}`\n\n**Copy-friendly setup**\n\nSetup page: `{setup_url}`\n\nPrivacy Policy URL: `{privacy_url}`\n\nPreset: `{permission_preset}`\n\nCapabilities: `{capabilities}`\n\n```text\n{gpt_instructions}\n```",
+        "data": {
+          "confirm": "I have copied the OAuth and GPT setup information"
+        }
+      }
+    },
+    "error": {
+      "invalid_configuration": "The URLs or role are not valid.",
+      "invalid_permissions": "The selected access preset or capabilities are not valid for this role.",
+      "secret_not_confirmed": "Copy the OAuth and GPT setup information and confirm before continuing."
+    },
+    "abort": {
+      "missing_pending_configuration": "The temporary One Bridge configuration was lost. Start setup again."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "One Bridge setup and access",
+        "description": "Update callback, GPT access and security settings. If only the callback URL changes, it is saved directly when you submit this screen. Other changes are staged and reviewed on the next screen before activation. Rotate the OAuth client secret only when you are ready to replace it in the GPT Action.",
+        "data": {
+          "callback_url": "ChatGPT OAuth callback URL",
+          "permission_preset": "Access preset",
+          "require_admin": "Require administrator",
+          "require_owner": "Require owner",
+          "persistent_refresh_token": "Persistent Home Assistant refresh token",
+          "read_only_lockdown": "Read-only lockdown",
+          "rotate_client_secret": "Generate a new OAuth client secret",
+          "internal_ws_url": "Internal WebSocket URL (blank = Auto)",
+          "internal_ws_verify_ssl": "Verify SSL for internal WebSocket"
+        },
+        "data_description": {
+          "callback_url": "Paste the callback URL shown by the GPT Action editor. A callback-only change is saved directly when you submit this screen. Leave blank until the editor provides one.",
+          "permission_preset": "Controls which capabilities and operations the GPT may use.",
+          "require_admin": "Only allow Home Assistant administrators to use the bridge.",
+          "require_owner": "Additionally require the Home Assistant owner account.",
+          "read_only_lockdown": "Block prepare/apply mutations while keeping allowed read operations available.",
+          "rotate_client_secret": "Generates a replacement secret and shows it once on the next screen. The existing secret stays active unless you confirm the staged settings.",
+          "internal_ws_url": "Optional loopback WebSocket endpoint ending in /api/websocket; leave blank for Auto.",
+          "internal_ws_verify_ssl": "Verify TLS certificates when the internal WebSocket uses wss://."
+        }
+      },
+      "capabilities": {
+        "title": "Choose allowed capabilities",
+        "description": "Choose the exact server-enforced capabilities for this GPT. Status/catalog access is always retained, and apply is added automatically when required by selected write capabilities.",
+        "data": {
+          "allowed_capabilities": "Allowed capabilities"
+        }
+      },
+      "setup": {
+        "title": "Updated GPT setup",
+        "description": "These settings are staged and are not active yet. Review the values below. If a new client secret is shown, copy it before confirming; the old secret remains active if you leave this flow. Confirming activates the staged settings. If permissions changed, re-import the stable Schema URL so the GPT editor receives the new operation list.\n\n**OAuth**\n\nClient ID: `{client_id}`\n\nClient Secret: `{client_secret}`\n\nAuthorization URL: `{authorization_url}`\n\nToken URL: `{token_url}`\n\nScope: `{scope}`\n\nCallback URL: `{callback_url}`\n\n**GPT Action schema**\n\nSchema URL: `{schema_url}`\n\n**Text instructions**\n\nInstructions URL: `{instructions_url}`\n\n**Copy-friendly setup**\n\nSetup page: `{setup_url}`\n\nPrivacy Policy URL: `{privacy_url}`\n\nPreset: `{permission_preset}`\n\nCapabilities: `{capabilities}`\n\n```text\n{gpt_instructions}\n```",
+        "data": {
+          "confirm": "Apply these settings"
+        }
+      }
+    },
+    "error": {
+      "invalid_options": "One or more callback, permission or advanced settings are invalid.",
+      "invalid_permissions": "The selected capabilities are not valid for this role.",
+      "setup_not_confirmed": "Review the updated GPT setup before closing the options flow."
+    },
+    "abort": {
+      "invalid_saved_configuration": "The saved One Bridge configuration failed validation and was not activated.",
+      "missing_pending_configuration": "The One Bridge configuration could not be loaded."
+    }
+  },
+  "selector": {
+    "permission_preset": {
+      "options": {
+        "minimal": "Minimal read access",
+        "home_control": "Home control (recommended)",
+        "read_only": "All read-only areas",
+        "advanced": "Advanced - all role capabilities",
+        "custom": "Custom"
+      }
+    },
+    "capability": {
+      "options": {
+        "status_read": "Bridge status and operation catalog",
+        "audit_read": "Audit log",
+        "files_read": "Files - read",
+        "files_write": "Files - prepare changes",
+        "control_read": "Home Assistant states, history and configuration - read",
+        "control_write": "Home Assistant services and configuration - prepare changes",
+        "lovelace_read": "Dashboards - read",
+        "lovelace_write": "Dashboards - prepare changes",
+        "registry_read": "Registries - read",
+        "registry_write": "Registries - prepare changes",
+        "helpers_read": "Helpers - read",
+        "helpers_write": "Helpers - prepare changes",
+        "backup_read": "Backups - read",
+        "backup_write": "Backups - prepare changes",
+        "deployment_read": "Supervisor, updates and deployment - read",
+        "deployment_source": "Source release preparation",
+        "deployment_target": "Target deployment preparation",
+        "git_commit": "Private source Git commit preparation",
+        "mutation_apply": "Apply confirmed prepared changes"
+      }
+    }
+  }
+}
