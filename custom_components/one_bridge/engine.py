@@ -28,6 +28,10 @@ from .operations import (
     config_entries_list,
     dashboard_get,
     dashboard_list,
+    esphome_build_start,
+    esphome_build_status,
+    esphome_upload_preflight,
+    esphome_upload_start,
     history,
     logbook,
     logs_get,
@@ -104,6 +108,9 @@ DISPATCH_OPERATION_HANDLERS = frozenset(
         "change.prepare.file",
         "change.prepare.file_patch",
         "esphome.config.validate",
+        "esphome.build.start",
+        "esphome.build.status",
+        "esphome.upload.prepare",
         "esphome.device.status",
         "esphome.logs.get",
         "change.prepare.registry",
@@ -418,6 +425,12 @@ class SuiteBridgeEngine:
             result = await self._prepare_file_patch(arguments, auth)
         elif operation == "esphome.config.validate":
             result = await self.hass.async_add_executor_job(validate_file, self.hass, {**arguments, "validation_profile": "esphome_yaml"})
+        elif operation == "esphome.build.start":
+            result = await esphome_build_start(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "esphome.build.status":
+            result = await esphome_build_status(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "esphome.upload.prepare":
+            result = await self._prepare_esphome_upload(arguments, auth)
         elif operation == "esphome.device.status":
             states = get_states(self.hass, {"entity_ids": arguments["entity_ids"], "include_attributes": bool(arguments.get("include_attributes", False))})
             unavailable = [item["entity_id"] for item in states["states"] if item["state"] in {"unavailable", "unknown"}]
@@ -492,6 +505,53 @@ class SuiteBridgeEngine:
             material=material, risk="normal",
         )
         await self.audit.append({"operation": "change.prepare.file_patch", "user_id": auth.user_id, "prepare_id": item.prepare_id, "root": material["root"], "path": material["path"], "before_sha256": material["before_sha256"], "after_sha256": material["after_sha256"], "result": "prepared"})
+        return self._prepared_response(item)
+
+    async def _prepare_esphome_upload(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        device = str(arguments["device"]).strip()
+        build_job_id = str(arguments["build_job_id"]).strip()
+        preflight = await esphome_upload_preflight(
+            self.hass, auth.refresh_token_id, device, build_job_id
+        )
+        source_path = Path(self.hass.config.path("esphome", preflight["configuration"]))
+        source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        material = {
+            "device": device,
+            "configuration": preflight["configuration"],
+            "build_job_id": build_job_id,
+            "source_sha256": source_sha256,
+            "target": "OTA",
+            "bootloader": False,
+            "binaries": preflight["binaries"],
+            "builder": preflight["builder"],
+        }
+        normalized = {
+            **material,
+            "build_job": {
+                "job_id": preflight["build_job"].get("job_id"),
+                "job_type": preflight["build_job"].get("job_type"),
+                "status": preflight["build_job"].get("status"),
+                "configuration": preflight["build_job"].get("configuration"),
+            },
+        }
+        item = await self.prepared.create(
+            user_id=auth.user_id,
+            refresh_token_id=auth.refresh_token_id,
+            operation="esphome.upload",
+            normalized_change=normalized,
+            material=material,
+            risk="high",
+        )
+        await self.audit.append({
+            "operation": "esphome.upload.prepare",
+            "user_id": auth.user_id,
+            "prepare_id": item.prepare_id,
+            "device": device,
+            "configuration": preflight["configuration"],
+            "build_job_id": build_job_id,
+            "source_sha256": source_sha256,
+            "result": "prepared",
+        })
         return self._prepared_response(item)
 
     async def _prepare_service(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
@@ -1090,6 +1150,38 @@ class SuiteBridgeEngine:
                     "before": {"sha256": item.material["before_sha256"]},
                     "after": {"sha256": item.material["after_sha256"]},
                     "validation": item.material.get("validation", {"ok": True, "profile": None}),
+                })
+            elif item.operation == "esphome.upload":
+                material = item.material
+                source_path = Path(self.hass.config.path("esphome", material["configuration"]))
+                if not source_path.is_file():
+                    raise SuiteBridgeError("ESPHOME_CONFIG_NOT_FOUND", "ESPHome-konfigurationen forsvandt efter prepare.", 409)
+                current_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+                if current_sha256 != material["source_sha256"]:
+                    raise SuiteBridgeError("ESPHOME_CONFIG_CHANGED", "ESPHome-konfigurationen er ændret efter upload-prepare.", 409)
+                preflight = await esphome_upload_preflight(
+                    self.hass,
+                    auth.refresh_token_id,
+                    material["device"],
+                    material["build_job_id"],
+                )
+                result = await esphome_upload_start(
+                    self.hass, auth.refresh_token_id, material["configuration"]
+                )
+                result["preflight"] = {
+                    "build_job_id": material["build_job_id"],
+                    "source_sha256": current_sha256,
+                    "binary_count": len(preflight["binaries"]),
+                }
+                result["verified"] = bool(result.get("job", {}).get("job_id"))
+                result["verification_pending"] = True
+                await self.audit.append({
+                    "operation": item.operation,
+                    "user_id": auth.user_id,
+                    "prepare_id": prepare_id,
+                    "device": material["device"],
+                    "job_id": result.get("job", {}).get("job_id"),
+                    "result": "upload_queued",
                 })
             elif item.operation == "service.call":
                 material = item.material

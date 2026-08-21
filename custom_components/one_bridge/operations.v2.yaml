@@ -735,6 +735,95 @@
       "permission": "admin"
     },
     {
+      "name": "esphome.build.start",
+      "mode": "read",
+      "risk": 0,
+      "description": "Kø en lokal ESPHome-compile i den faste Device Builder uden upload eller flash",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          "tail_lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "required": [
+          "device"
+        ],
+        "additionalProperties": false
+      },
+      "category": "esphome",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "esphome.build.status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent status, fejl og begrænset output-tail for et ESPHome compile-job",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "tail_lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "additionalProperties": false
+      },
+      "category": "esphome",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
+      "name": "esphome.upload.prepare",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Forbered OTA-upload af en eksisterende binary bundet til et konkret succesfuldt ESPHome compile-job",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          "build_job_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "device",
+          "build_job_id"
+        ],
+        "additionalProperties": false
+      },
+      "category": "esphome",
+      "capability": "control:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin"
+    },
+    {
       "name": "esphome.device.status",
       "mode": "read",
       "risk": 0,
@@ -1476,7 +1565,7 @@
       "name": "change.prepare.file_patch",
       "mode": "prepare",
       "risk": 1,
-      "description": "Forbered eksakte linje-patches med filhash, diff og validering",
+      "description": "Forbered eksakte filhash-bundne patches; unikt old_content kan sikkert relokaliseres ved forskudte linjehints",
       "arguments": {
         "type": "object",
         "properties": {

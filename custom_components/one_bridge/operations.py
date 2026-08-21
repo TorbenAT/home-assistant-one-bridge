@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .models import SuiteBridgeError
 from .redaction import redact_text
-from .ws_client import async_ws_command
+from .ws_client import async_ws_command, resolve_internal_ws_transport
 
 
 def _limit(value: Any, default: int = 100, maximum: int = 250) -> int:
@@ -325,3 +328,286 @@ async def updates_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> di
     except SuiteBridgeError as err:
         return {"updates": {}, "available": False, "upstream_error": err.code}
     return {"updates": result or {}}
+
+
+_ESPHOME_ADDON_SLUG = "5c53de3b_esphome"
+_ESPHOME_INGRESS_PREFIX = "/api/hassio_ingress/"
+_ESPHOME_TERMINAL_JOB_STATES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _supervisor_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    data = value.get("data")
+    return data if isinstance(data, dict) else value
+
+
+def _esphome_ingress_entry(addon_info: Any) -> str:
+    """Return only the Supervisor-generated ingress entry for the fixed ESPHome app."""
+    info = _supervisor_payload(addon_info)
+    if str(info.get("slug") or "") != _ESPHOME_ADDON_SLUG:
+        raise SuiteBridgeError(
+            "ESPHOME_BUILDER_IDENTITY_MISMATCH",
+            "Supervisor-returneret app-identitet matcher ikke den allowlistede ESPHome Device Builder.",
+            502,
+        )
+    if info.get("ingress") is not True:
+        raise SuiteBridgeError(
+            "ESPHOME_BUILDER_INGRESS_UNAVAILABLE",
+            "ESPHome Device Builder har ikke Supervisor ingress aktiveret.",
+            503,
+        )
+    entry = str(info.get("ingress_entry") or "").strip().rstrip("/")
+    if not entry.startswith(_ESPHOME_INGRESS_PREFIX):
+        raise SuiteBridgeError(
+            "ESPHOME_BUILDER_INGRESS_INVALID",
+            "Supervisor returnerede ingen gyldig ESPHome ingress-entry.",
+            502,
+        )
+    token = entry[len(_ESPHOME_INGRESS_PREFIX):]
+    if not token or "/" in token or len(token) > 256:
+        raise SuiteBridgeError(
+            "ESPHOME_BUILDER_INGRESS_INVALID",
+            "ESPHome ingress-entry har et ugyldigt tokenformat.",
+            502,
+        )
+    return entry
+
+
+def _esphome_builder_ws_url(hass: Any, addon_info: Any) -> tuple[str, bool]:
+    ingress_entry = _esphome_ingress_entry(addon_info)
+    internal_ws_url, verify_ssl = resolve_internal_ws_transport(hass)
+    parsed = urlparse(internal_ws_url)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+        raise SuiteBridgeError(
+            "ESPHOME_BUILDER_INTERNAL_URL_INVALID",
+            "Home Assistants interne WebSocket-transport kunne ikke bruges til ESPHome ingress.",
+            500,
+        )
+    return f"{parsed.scheme}://{parsed.netloc}{ingress_entry}/ws", verify_ssl
+
+
+def _bounded_esphome_job(job: Any, tail_lines: int = 80) -> dict[str, Any]:
+    if not isinstance(job, dict):
+        return {"raw_type": type(job).__name__}
+    raw_output = job.get("output") or []
+    if isinstance(raw_output, str):
+        output_lines = raw_output.splitlines()
+    elif isinstance(raw_output, list):
+        output_lines = [str(line).rstrip("\r\n") for line in raw_output]
+    else:
+        output_lines = [str(raw_output)]
+    output_tail = [redact_text(line) for line in output_lines[-tail_lines:]]
+    status = str(job.get("status") or "unknown")
+    result = {
+        "job_id": job.get("job_id"),
+        "job_type": job.get("job_type"),
+        "configuration": job.get("configuration"),
+        "status": status,
+        "terminal": status in _ESPHOME_TERMINAL_JOB_STATES,
+        "success": status == "completed",
+        "progress": job.get("progress"),
+        "error": redact_text(str(job.get("error") or job.get("error_message") or "")),
+        "output_tail": output_tail,
+        "output_tail_count": len(output_tail),
+    }
+    for key in ("created_at", "started_at", "finished_at", "updated_at"):
+        if key in job:
+            result[key] = job.get(key)
+    return result
+
+
+async def _esphome_builder_command(
+    hass: Any,
+    auth_id: str,
+    command: str,
+    args: dict[str, Any],
+) -> tuple[dict[str, Any], Any]:
+    # The transport and command vocabulary are fixed here. GPT cannot supply a URL,
+    # app slug, port, free command string, shell command or arbitrary configuration path.
+    if command not in {"firmware/compile", "firmware/get_job", "firmware/get_binaries", "firmware/upload"}:
+        raise SuiteBridgeError("ESPHOME_BUILDER_COMMAND_DENIED", "ESPHome builder-kommandoen er ikke allowlistet.", 403)
+    addon_info = await async_ws_command(
+        hass,
+        auth_id,
+        {"type": "supervisor/api", "endpoint": f"/addons/{_ESPHOME_ADDON_SLUG}/info", "method": "get"},
+    )
+    ingress_session_result = await async_ws_command(
+        hass,
+        auth_id,
+        {"type": "supervisor/api", "endpoint": "/ingress/session", "method": "post", "data": {}},
+    )
+    ingress_session = str(_supervisor_payload(ingress_session_result).get("session") or "").strip()
+    if not ingress_session or len(ingress_session) > 512:
+        raise SuiteBridgeError(
+            "ESPHOME_BUILDER_INGRESS_SESSION_FAILED",
+            "Supervisor oprettede ikke en gyldig ingress-session til ESPHome Device Builder.",
+            502,
+        )
+    ws_url, verify_ssl = _esphome_builder_ws_url(hass, addon_info)
+
+    from aiohttp import WSMsgType
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+    session = async_get_clientsession(hass)
+    message_id = "one-bridge-esphome"
+    try:
+        async with asyncio.timeout(30):
+            async with session.ws_connect(
+                ws_url,
+                headers={"Cookie": f"ingress_session={ingress_session}"},
+                max_msg_size=8_000_000,
+                heartbeat=10,
+                ssl=verify_ssl,
+            ) as ws:
+                hello = await ws.receive_json()
+                if not isinstance(hello, dict):
+                    raise SuiteBridgeError("ESPHOME_BUILDER_PROTOCOL", "ESPHome Device Builder sendte ugyldig handshake.", 502)
+                if hello.get("requires_auth"):
+                    raise SuiteBridgeError(
+                        "ESPHOME_BUILDER_AUTH_REQUIRED",
+                        "ESPHome Device Builder kræver direkte login; One Bridge sender ikke credentials.",
+                        403,
+                    )
+                await ws.send_json({"command": command, "message_id": message_id, "args": args})
+                while True:
+                    reply = await ws.receive()
+                    if reply.type in {WSMsgType.CLOSED, WSMsgType.CLOSE, WSMsgType.ERROR}:
+                        raise SuiteBridgeError("ESPHOME_BUILDER_CLOSED", "ESPHome Device Builder lukkede forbindelsen uventet.", 502)
+                    if reply.type != WSMsgType.TEXT:
+                        continue
+                    payload = reply.json()
+                    if not isinstance(payload, dict) or payload.get("message_id") != message_id:
+                        continue
+                    if payload.get("error_code"):
+                        raise SuiteBridgeError(
+                            "ESPHOME_BUILDER_ERROR",
+                            f"{payload.get('error_code')}: {redact_text(str(payload.get('details') or 'Ukendt builder-fejl'))}",
+                            502,
+                        )
+                    if "result" in payload:
+                        return hello, payload.get("result")
+                    if payload.get("event") == "result":
+                        return hello, payload.get("data")
+    except TimeoutError as err:
+        raise SuiteBridgeError("ESPHOME_BUILDER_TIMEOUT", "ESPHome Device Builder svarede ikke inden for 30 sekunder.", 504) from err
+    except SuiteBridgeError:
+        raise
+    except Exception as err:
+        raise SuiteBridgeError(
+            "ESPHOME_BUILDER_FAILED",
+            f"ESPHome Device Builder-forbindelsen fejlede: {type(err).__name__}: {redact_text(str(err))}",
+            502,
+        ) from err
+
+
+async def esphome_build_start(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    device = str(arguments["device"]).strip()
+    configuration = f"{device}.yaml"
+    source_path = Path(hass.config.path("esphome", configuration))
+    if not source_path.is_file():
+        raise SuiteBridgeError("ESPHOME_CONFIG_NOT_FOUND", f"ESPHome-konfigurationen findes ikke: esphome/{configuration}", 404)
+    hello, job = await _esphome_builder_command(
+        hass,
+        auth_id,
+        "firmware/compile",
+        {"configuration": configuration},
+    )
+    return {
+        "device": device,
+        "configuration": configuration,
+        "builder": {
+            "server_version": hello.get("server_version"),
+            "esphome_version": hello.get("esphome_version"),
+            "ha_addon": hello.get("ha_addon"),
+            "ha_ingress": hello.get("ha_ingress"),
+        },
+        "job": _bounded_esphome_job(job, min(int(arguments.get("tail_lines", 40)), 200)),
+        "uploads_device": False,
+    }
+
+
+async def esphome_build_status(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    job_id = str(arguments["job_id"]).strip()
+    hello, job = await _esphome_builder_command(
+        hass,
+        auth_id,
+        "firmware/get_job",
+        {"job_id": job_id},
+    )
+    return {
+        "builder": {
+            "server_version": hello.get("server_version"),
+            "esphome_version": hello.get("esphome_version"),
+        },
+        "job": _bounded_esphome_job(job, min(int(arguments.get("tail_lines", 80)), 200)),
+        "uploads_device": False,
+    }
+
+
+async def esphome_upload_preflight(
+    hass: Any, auth_id: str, device: str, build_job_id: str
+) -> dict[str, Any]:
+    configuration = f"{device}.yaml"
+    source_path = Path(hass.config.path("esphome", configuration))
+    if not source_path.is_file():
+        raise SuiteBridgeError("ESPHOME_CONFIG_NOT_FOUND", f"ESPHome-konfigurationen findes ikke: esphome/{configuration}", 404)
+
+    hello, job = await _esphome_builder_command(
+        hass, auth_id, "firmware/get_job", {"job_id": build_job_id}
+    )
+    bounded = _bounded_esphome_job(job, 20)
+    if bounded.get("configuration") != configuration:
+        raise SuiteBridgeError("ESPHOME_BUILD_JOB_MISMATCH", "Build-jobbet tilhører ikke den valgte ESPHome-konfiguration.", 409)
+    if str(bounded.get("job_type") or "").lower() != "compile" or bounded.get("status") != "completed":
+        raise SuiteBridgeError("ESPHOME_BUILD_NOT_READY", "Build-jobbet er ikke et færdigt succesfuldt compile-job.", 409, details={"job": bounded})
+
+    _, binaries = await _esphome_builder_command(
+        hass, auth_id, "firmware/get_binaries", {"configuration": configuration}
+    )
+    if not isinstance(binaries, list) or not binaries:
+        raise SuiteBridgeError("ESPHOME_BINARY_NOT_FOUND", "Device Builder har ingen eksisterende firmware-binary til upload.", 409)
+    safe_binaries = []
+    for item in binaries[:20]:
+        if isinstance(item, dict):
+            safe_binaries.append({
+                "title": redact_text(str(item.get("title") or "")),
+                "type": redact_text(str(item.get("type") or "")),
+                "description": redact_text(str(item.get("description") or "")),
+            })
+    return {
+        "device": device,
+        "configuration": configuration,
+        "build_job": bounded,
+        "binaries": safe_binaries,
+        "builder": {
+            "server_version": hello.get("server_version"),
+            "esphome_version": hello.get("esphome_version"),
+            "ha_ingress": hello.get("ha_ingress"),
+        },
+        "target": "OTA",
+        "bootloader": False,
+    }
+
+
+async def esphome_upload_start(
+    hass: Any, auth_id: str, configuration: str
+) -> dict[str, Any]:
+    hello, job = await _esphome_builder_command(
+        hass,
+        auth_id,
+        "firmware/upload",
+        {"configuration": configuration, "port": "OTA", "bootloader": False},
+    )
+    return {
+        "configuration": configuration,
+        "builder": {
+            "server_version": hello.get("server_version"),
+            "esphome_version": hello.get("esphome_version"),
+            "ha_ingress": hello.get("ha_ingress"),
+        },
+        "job": _bounded_esphome_job(job, 40),
+        "uploads_device": True,
+        "target": "OTA",
+        "bootloader": False,
+    }

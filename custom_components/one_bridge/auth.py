@@ -11,6 +11,7 @@ from http import HTTPStatus
 import hmac
 import json
 import logging
+import math
 import time
 from typing import Any
 
@@ -78,10 +79,21 @@ class BridgeAuthorizer:
         while queue and now - queue[0] > API_RATE_WINDOW_SECONDS:
             queue.popleft()
         if len(queue) >= maximum:
+            retry_after_seconds = max(
+                1,
+                math.ceil(API_RATE_WINDOW_SECONDS - (now - queue[0])),
+            )
             raise SuiteBridgeError(
                 "RATE_LIMITED",
-                f"For mange {bucket}-kald; prøv igen senere.",
+                f"For mange {bucket}-kald; prøv igen efter cooldown.",
                 HTTPStatus.TOO_MANY_REQUESTS,
+                details={
+                    "bucket": bucket,
+                    "limit": maximum,
+                    "window_seconds": API_RATE_WINDOW_SECONDS,
+                    "retry_after_seconds": retry_after_seconds,
+                    "recovery": "Genbrug et gyldigt prepare-resultat; lav ikke en dublet-prepare alene på grund af rate limit.",
+                },
             )
         queue.append(now)
 

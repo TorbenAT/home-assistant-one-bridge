@@ -287,12 +287,28 @@ def prepare_file_patch(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         raise SuiteBridgeError("INVALID_FILE_PATCHES", "patches skal indeholde 1-20 ændringer.", 400)
 
     lines = before_text.splitlines(keepends=True)
+
+    def exact_line_matches(old_content: str) -> list[tuple[int, int]]:
+        """Find exact whole-line occurrences in the unchanged source file."""
+        old_lines = old_content.splitlines(keepends=True)
+        if not old_lines:
+            return []
+        width = len(old_lines)
+        matches: list[tuple[int, int]] = []
+        for candidate_start in range(1, len(lines) - width + 2):
+            candidate_end = candidate_start + width - 1
+            if "".join(lines[candidate_start - 1:candidate_end]) == old_content:
+                matches.append((candidate_start, candidate_end))
+        return matches
+
     checked: list[tuple[int, int, str, dict[str, Any]]] = []
     for index, patch in enumerate(patches, 1):
         if not isinstance(patch, dict):
             raise SuiteBridgeError("INVALID_FILE_PATCH", f"Patch {index} skal være et objekt.", 400)
         start, end = patch.get("start_line"), patch.get("end_line")
         old_content, new_content = patch.get("old_content"), patch.get("new_content")
+        if not isinstance(old_content, str) or not isinstance(new_content, str):
+            raise SuiteBridgeError("INVALID_FILE_PATCH", f"Patch {index} skal have tekst i old_content og new_content.", 400)
         if (
             isinstance(start, bool)
             or isinstance(end, bool)
@@ -300,15 +316,67 @@ def prepare_file_patch(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             or not isinstance(end, int)
             or start < 1
             or end < start
-            or end > len(lines)
         ):
             raise SuiteBridgeError("INVALID_FILE_PATCH_RANGE", f"Patch {index} har et ugyldigt linjeområde.", 400)
-        if not isinstance(old_content, str) or not isinstance(new_content, str):
-            raise SuiteBridgeError("INVALID_FILE_PATCH", f"Patch {index} skal have tekst i old_content og new_content.", 400)
-        actual = "".join(lines[start - 1:end])
-        if actual != old_content:
-            raise SuiteBridgeError("FILE_PATCH_MISMATCH", f"Patch {index} matcher ikke filens aktuelle indhold.", 409)
-        checked.append((start, end, new_content, {"start_line": start, "end_line": end, "matched": True}))
+
+        requested_start, requested_end = start, end
+        in_bounds = end <= len(lines)
+        exact_requested_match = in_bounds and "".join(lines[start - 1:end]) == old_content
+        relocated = False
+        if not exact_requested_match:
+            matches = exact_line_matches(old_content)
+            if len(matches) == 1:
+                start, end = matches[0]
+                relocated = (start, end) != (requested_start, requested_end)
+            elif len(matches) > 1:
+                raise SuiteBridgeError(
+                    "FILE_PATCH_AMBIGUOUS",
+                    f"Patch {index} matcher flere steder; linjeområdet kan ikke flyttes sikkert.",
+                    409,
+                    details={
+                        "patch_index": index,
+                        "match_count": len(matches),
+                        "candidate_ranges": [
+                            {"start_line": candidate_start, "end_line": candidate_end}
+                            for candidate_start, candidate_end in matches[:10]
+                        ],
+                        "recovery": "Læs det relevante filområde igen og angiv en entydig old_content-blok.",
+                    },
+                )
+            elif not in_bounds:
+                raise SuiteBridgeError(
+                    "INVALID_FILE_PATCH_RANGE",
+                    f"Patch {index} ligger uden for filen, og old_content kunne ikke flyttes entydigt.",
+                    400,
+                    details={
+                        "patch_index": index,
+                        "requested_start_line": requested_start,
+                        "requested_end_line": requested_end,
+                        "line_count": len(lines),
+                        "recovery": "Læs filen igen og genbrug den aktuelle sha256 og eksakte old_content.",
+                    },
+                )
+            else:
+                raise SuiteBridgeError(
+                    "FILE_PATCH_MISMATCH",
+                    f"Patch {index} matcher ikke filens aktuelle indhold, og old_content findes ikke entydigt.",
+                    409,
+                    details={
+                        "patch_index": index,
+                        "requested_start_line": requested_start,
+                        "requested_end_line": requested_end,
+                        "recovery": "Læs det mindste relevante filområde igen og genberegn patchen fra den aktuelle fil.",
+                    },
+                )
+
+        meta: dict[str, Any] = {"start_line": start, "end_line": end, "matched": True}
+        if relocated:
+            meta.update({
+                "relocated": True,
+                "requested_start_line": requested_start,
+                "requested_end_line": requested_end,
+            })
+        checked.append((start, end, new_content, meta))
 
     previous_end = 0
     for start, end, _, _ in sorted(checked):

@@ -338,7 +338,7 @@ class GitHubReleaseSource:
             url,
             headers={
                 "Accept": "application/vnd.github+json",
-                "User-Agent": "home-assistant-one-bridge-release/0.9.0",
+                "User-Agent": "home-assistant-one-bridge-release/0.9.1",
             },
         )
         with urlopen(request, timeout=timeout) as response:

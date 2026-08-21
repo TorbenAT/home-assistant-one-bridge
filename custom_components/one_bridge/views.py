@@ -161,6 +161,10 @@ def build_gpt_instructions(engine: SuiteBridgeEngine) -> str:
         "- The server-side operation catalog is authoritative. Use system.catalog when an operation name or arguments are unknown.",
         "- Never invent operations, modes or fields, and never try to bypass a server rejection.",
         "- Only use operations returned by system.catalog; the catalog is filtered to this installation's allowed capabilities.",
+        "- For change.prepare.file_patch, use the latest file sha256 and exact old_content. Line numbers are location hints; the server may safely relocate a patch only when old_content occurs exactly once.",
+        "- On FILE_PATCH_MISMATCH, INVALID_FILE_PATCH_RANGE or FILE_PATCH_AMBIGUOUS, re-read the smallest relevant file region and retry from the current sha256. Do not guess a new range or switch to a less strict write path.",
+        "- On RATE_LIMITED, respect retry_after_seconds and do not create a duplicate prepare. Reuse the still-valid prepare_id and digest after cooldown; an apply retry uses a fresh idempotency key.",
+        "- If an apply response is lost or transport fails, use system.apply.status before deciding whether any retry is safe.",
     ])
     if writable:
         lines.extend([
