@@ -17,6 +17,7 @@ from .audit import AuditLog
 from .auth import BridgeAuthorizer, OAuthClientMetadataView, OAuthRevokeProxyView, OAuthTokenProxyView
 from .config import async_load_config
 from .const import API_VERSION, DOMAIN, PREPARE_TTL_SECONDS, PRIVATE_CONFIG_RELATIVE
+from .dispatch import OperationCatalog
 from .engine import SuiteBridgeEngine
 from .models import digest_json
 from .prepared import PreparedMutationStore
@@ -291,8 +292,14 @@ async def _async_initialize(hass: HomeAssistant) -> bool:
     authorizer = BridgeAuthorizer(hass, bridge_config)
     audit = AuditLog(hass)
     await audit.async_load()
+    catalog = await hass.async_add_executor_job(
+        OperationCatalog.from_path,
+        Path(__file__).with_name("operations.v2.yaml"),
+    )
     prepared = PreparedMutationStore(ttl_seconds=PREPARE_TTL_SECONDS)
-    engine = SuiteBridgeEngine(hass, bridge_config, authorizer, audit, prepared)
+    engine = SuiteBridgeEngine(
+        hass, bridge_config, authorizer, audit, prepared, catalog
+    )
     oauth_client_view = OAuthClientMetadataView(bridge_config)
     oauth_token_view = OAuthTokenProxyView(hass, bridge_config)
     oauth_revoke_view = OAuthRevokeProxyView(hass, bridge_config)

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import Any, Collection, Mapping
 import uuid
 
 
@@ -27,6 +27,30 @@ class SuiteBridgeError(Exception):
         self.message = message
         self.status = status
         self.details = details or {}
+
+
+def enforce_capability_policy(
+    *,
+    capabilities: Collection[str],
+    role: str,
+    read_only_lockdown: bool,
+    capability: str,
+    mutation: bool,
+) -> None:
+    """Enforce the authoritative server-side capability boundary."""
+    if capability not in capabilities:
+        raise SuiteBridgeError(
+            "CAPABILITY_DENIED",
+            f"Rollen {role} tillader ikke capability {capability}.",
+            403,
+        )
+
+    if mutation and read_only_lockdown:
+        raise SuiteBridgeError(
+            "READ_ONLY_LOCKDOWN",
+            "Bridge er lokalt låst i read-only mode.",
+            423,
+        )
 
 
 def new_id(prefix: str) -> str:

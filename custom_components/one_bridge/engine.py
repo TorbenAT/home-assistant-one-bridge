@@ -52,7 +52,7 @@ from .dispatch import (
 )
 from .helpers import HelperManager
 from .lovelace import LovelaceManager
-from .models import SuiteBridgeError
+from .models import SuiteBridgeError, enforce_capability_policy
 from .models import digest_json, json_safe
 from .prepared import PreparedMutationStore
 from .idempotency import IdempotencyStore
@@ -120,12 +120,14 @@ class SuiteBridgeEngine:
         authorizer: BridgeAuthorizer,
         audit: AuditLog,
         prepared: PreparedMutationStore,
+        catalog: OperationCatalog,
     ) -> None:
         self.hass = hass
         self.config = config
         self.authorizer = authorizer
         self.audit = audit
         self.prepared = prepared
+        self.catalog = catalog
         self.backups = BackupManager(hass)
         self.lovelace = LovelaceManager(
             hass, config, prepared, self.backups, audit
@@ -137,9 +139,6 @@ class SuiteBridgeEngine:
             hass, config, prepared, self.backups, audit, self.lovelace
         )
         self.deployment = DeploymentManager(hass, config)
-        self.catalog = OperationCatalog.from_path(
-            Path(__file__).with_name("operations.v2.yaml")
-        )
         self.change_idempotency = IdempotencyStore()
         self.implemented_operations = IMPLEMENTED_OPERATIONS
         if self.catalog.names != self.implemented_operations:
@@ -279,13 +278,13 @@ class SuiteBridgeEngine:
         arguments = envelope["arguments"]
         contract = self.catalog.resolve(operation, mode, arguments)
         required_capability = contract.get("capability")
-        if required_capability not in self.config.capabilities:
-            raise SuiteBridgeError(
-                "CAPABILITY_DENIED",
-                f"Rollen {self.config.role} tillader ikke capability "
-                f"{required_capability}.",
-                403,
-            )
+        enforce_capability_policy(
+            capabilities=self.config.capabilities,
+            role=self.config.role,
+            read_only_lockdown=self.config.read_only_lockdown,
+            capability=str(required_capability),
+            mutation=mode == "prepare",
+        )
         if operation == "system.status":
             result = self._system_status(auth)
         elif operation == "system.catalog":
@@ -559,13 +558,13 @@ class SuiteBridgeEngine:
         arguments = envelope["arguments"]
         contract = self.catalog.resolve(operation, "apply", arguments)
         required_capability = contract.get("capability")
-        if required_capability not in self.config.capabilities:
-            raise SuiteBridgeError(
-                "CAPABILITY_DENIED",
-                f"Rollen {self.config.role} tillader ikke capability "
-                f"{required_capability}.",
-                403,
-            )
+        enforce_capability_policy(
+            capabilities=self.config.capabilities,
+            role=self.config.role,
+            read_only_lockdown=self.config.read_only_lockdown,
+            capability=str(required_capability),
+            mutation=True,
+        )
         if operation == "change.apply":
             key = arguments["idempotency_key"]
             fingerprint = json.dumps(

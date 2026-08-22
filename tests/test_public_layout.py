@@ -48,6 +48,10 @@ assert hacs["name"] == "One Bridge"
 assert hacs["homeassistant"] == metadata["homeassistant_min"]
 assert (root / "README.md").is_file()
 assert (root / "LICENSE").is_file()
+assert (root / "SECURITY.md").is_file()
+security = (root / "SECURITY.md").read_text(encoding="utf-8").lower()
+for required in ("prepare/apply", "pkce", "read-only lockdown"):
+    assert required in security
 assert (suite / "brand" / "icon.png").stat().st_size > 100
 strings = json.loads((suite / "strings.json").read_text(encoding="utf-8"))
 assert "permissions" in strings["config"]["step"]
@@ -95,8 +99,12 @@ assert not list(suite.rglob("*.pyc"))
 for source_only_name in ("git_commit.py", "release.py", "worker_loader.py"):
     assert not (suite / source_only_name).exists(), source_only_name
 engine_text = (suite / "engine.py").read_text(encoding="utf-8")
-assert "self.catalog = OperationCatalog.from_path(" in engine_text
-assert engine_text.index("self.catalog = OperationCatalog.from_path(") < engine_text.index("if self.catalog.names != self.implemented_operations:")
+assert "OperationCatalog.from_path(" not in engine_text
+assert "self.catalog = catalog" in engine_text
+assert "enforce_capability_policy(" in engine_text
+assert "enforce_capability_policy(" in (suite / "auth.py").read_text(encoding="utf-8")
+assert "code_verifier" in (suite / "auth.py").read_text(encoding="utf-8")
+assert "async_add_executor_job(\n        OperationCatalog.from_path," in init_source
 catalog = json.loads((suite / "operations.v2.yaml").read_text(encoding="utf-8"))
 assert all(
     item.get("capability") not in {"deployment:source", "git:commit"}

@@ -35,10 +35,22 @@ from .const import (
     TOKEN_RATE_MAX_FAILURES,
     TOKEN_RATE_WINDOW_SECONDS,
 )
-from .models import SuiteBridgeError
+from .models import SuiteBridgeError, enforce_capability_policy
 
 
 _LOGGER = logging.getLogger(__name__)
+_PKCE_ALLOWED_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789-._~"
+)
+
+
+def _valid_pkce_code_verifier(code_verifier: str) -> bool:
+    """Validate the RFC 7636 verifier syntax without retaining its value."""
+    return 43 <= len(code_verifier) <= 128 and all(
+        char in _PKCE_ALLOWED_CHARACTERS for char in code_verifier
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,18 +145,13 @@ class BridgeAuthorizer:
                 "Bridge-konfigurationen kræver en administrator.",
                 HTTPStatus.FORBIDDEN,
             )
-        if capability not in config.capabilities:
-            raise SuiteBridgeError(
-                "CAPABILITY_DENIED",
-                f"Rollen {config.role} tillader ikke capability {capability}.",
-                HTTPStatus.FORBIDDEN,
-            )
-        if mutation and config.read_only_lockdown:
-            raise SuiteBridgeError(
-                "READ_ONLY_LOCKDOWN",
-                "Bridge er lokalt låst i read-only mode.",
-                HTTPStatus.LOCKED,
-            )
+        enforce_capability_policy(
+            capabilities=config.capabilities,
+            role=config.role,
+            read_only_lockdown=config.read_only_lockdown,
+            capability=capability,
+            mutation=mutation,
+        )
         self._check_api_rate(
             refresh_token_id, capability, mutation=mutation
         )
@@ -393,6 +400,19 @@ class OAuthTokenProxyView(HomeAssistantView):
             # Preserve GPT's exact callback URI for HA's authorization-code
             # validation. Never reconstruct or hardcode a GPT callback here.
             forwarded["redirect_uri"] = redirect_uri
+            code_verifier = data.get("code_verifier", "")
+            if code_verifier:
+                if not _valid_pkce_code_verifier(code_verifier):
+                    self._limiter.failed(remote)
+                    return web.json_response(
+                        {
+                            "error": "invalid_request",
+                            "error_description": "Ugyldig PKCE code_verifier.",
+                        },
+                        status=HTTPStatus.BAD_REQUEST,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                forwarded["code_verifier"] = code_verifier
         else:
             supplied_refresh_token = data.get("refresh_token", "")
             if not supplied_refresh_token:
