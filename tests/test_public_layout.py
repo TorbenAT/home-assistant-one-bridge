@@ -94,6 +94,9 @@ assert not list(suite.rglob("__pycache__"))
 assert not list(suite.rglob("*.pyc"))
 for source_only_name in ("git_commit.py", "release.py", "worker_loader.py"):
     assert not (suite / source_only_name).exists(), source_only_name
+engine_text = (suite / "engine.py").read_text(encoding="utf-8")
+assert "self.catalog = OperationCatalog.from_path(" in engine_text
+assert engine_text.index("self.catalog = OperationCatalog.from_path(") < engine_text.index("if self.catalog.names != self.implemented_operations:")
 catalog = json.loads((suite / "operations.v2.yaml").read_text(encoding="utf-8"))
 assert all(
     item.get("capability") not in {"deployment:source", "git:commit"}

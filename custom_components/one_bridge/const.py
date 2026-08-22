@@ -5,7 +5,7 @@ from __future__ import annotations
 DOMAIN = "one_bridge"
 API_VERSION = 1
 PROTOCOL_VERSION = 2
-BOOTSTRAP_VERSION = "0.9.2"
+BOOTSTRAP_VERSION = "0.9.3"
 CATALOG_VERSION = 2
 
 PRIVATE_CONFIG_RELATIVE = "one-bridge/private/bridge-v1.json"

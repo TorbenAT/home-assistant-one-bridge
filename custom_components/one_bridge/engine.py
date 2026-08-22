@@ -137,6 +137,9 @@ class SuiteBridgeEngine:
             hass, config, prepared, self.backups, audit, self.lovelace
         )
         self.deployment = DeploymentManager(hass, config)
+        self.catalog = OperationCatalog.from_path(
+            Path(__file__).with_name("operations.v2.yaml")
+        )
         self.change_idempotency = IdempotencyStore()
         self.implemented_operations = IMPLEMENTED_OPERATIONS
         if self.catalog.names != self.implemented_operations:
