@@ -99,8 +99,7 @@ assert all(
     item.get("capability") not in {"deployment:source", "git:commit"}
     for item in catalog["operations"]
 )
-installed_text = "
-".join(
+installed_text = "\n".join(
     path.read_text(encoding="utf-8", errors="replace")
     for path in suite.rglob("*")
     if path.is_file() and path.suffix.lower() in {".py", ".json", ".yaml", ".yml", ".md", ".txt"}
