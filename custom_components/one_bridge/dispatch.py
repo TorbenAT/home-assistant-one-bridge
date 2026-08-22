@@ -111,10 +111,10 @@ def validate_apply_envelope(payload: Any) -> dict[str, Any]:
             f"Obligatorisk top-level felt mangler: {missing}",
             field=missing,
         )
-    if payload.get("operation") not in {"change.apply", "release.apply"}:
+    if payload.get("operation") != "change.apply":
         raise _error(
             "INVALID_APPLY_OPERATION",
-            "apply tillader kun change.apply eller release.apply.",
+            "apply tillader kun change.apply.",
             field="operation",
         )
     return dict(payload)
@@ -346,27 +346,21 @@ class OperationCatalog:
 
 
 class SystemOperations:
-    """Pure handlers for the bootstrap-owned system operations."""
+    """Pure handlers for target-safe system operations."""
 
     def __init__(
         self,
         catalog: OperationCatalog,
-        release_status: Any,
         implemented_operations: frozenset[str],
     ) -> None:
         self.catalog = catalog
-        self.release_status = release_status
         self.implemented_operations = implemented_operations
 
     def status(self, base_status: Mapping[str, Any]) -> dict[str, Any]:
-        release = self.release_status()
         return {
             **dict(base_status),
             "bootstrap_version": BOOTSTRAP_VERSION,
             "catalog_version": self.catalog.catalog_version,
-            "worker_version": release.get("active_worker_version"),
-            "worker_commit": release.get("active_commit"),
-            "release": release,
         }
 
     def catalog_result(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -384,14 +378,10 @@ class SystemOperations:
         }
 
     def capabilities(self) -> dict[str, Any]:
-        release = self.release_status()
         return {
             "bootstrap_version": BOOTSTRAP_VERSION,
             "protocol_version": self.catalog.schema_version,
             "catalog_version": self.catalog.catalog_version,
             "implemented_operations": sorted(self.implemented_operations),
             "catalog_operations": len(self.catalog.names),
-            "release_enabled": release["enabled"],
-            "worker_version": release.get("active_worker_version"),
-            "worker_commit": release.get("active_commit"),
         }

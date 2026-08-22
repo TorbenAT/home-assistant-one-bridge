@@ -89,7 +89,7 @@ def resolve_allowed_capabilities(
 ) -> tuple[str, frozenset[str]]:
     role_capabilities = ROLE_CAPABILITIES.get(role)
     if role_capabilities is None:
-        raise ValueError("role skal være source eller target.")
+        raise ValueError("role skal være target.")
     normalized_preset = str(preset or DEFAULT_PERMISSION_PRESET).strip().lower()
     if normalized_preset == "advanced":
         allowed = set(role_capabilities)
@@ -108,7 +108,7 @@ def resolve_allowed_capabilities(
     allowed.add("status:read")
     has_mutation_source = any(
         capability.endswith(":write")
-        or capability in {"deployment:source", "deployment:target", "git:commit"}
+        or capability == "deployment:target"
         for capability in allowed
     )
     if has_mutation_source:
@@ -146,7 +146,7 @@ def _load_file(path: Path) -> BridgeConfig:
             raise ValueError("Konfigurationen skal være et JSON-objekt.")
         role = str(raw.get("role", "")).strip().lower()
         if role not in ROLE_CAPABILITIES:
-            raise ValueError("role skal være source eller target.")
+            raise ValueError("role skal være target.")
         if "permission_preset" not in raw and "allowed_capabilities" not in raw:
             permission_preset, allowed_capabilities = "advanced", frozenset(ROLE_CAPABILITIES[role])
         else:

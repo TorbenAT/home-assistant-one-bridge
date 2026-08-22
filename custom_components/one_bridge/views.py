@@ -169,7 +169,7 @@ def build_gpt_instructions(engine: SuiteBridgeEngine) -> str:
     if writable:
         lines.extend([
             "- Every mutation must be prepared first. Inspect the target, before-state, requested change, diff, validation, risk, prepare_id, digest and expiry.",
-            "- Apply only with change.apply or release.apply, using the exact server-issued prepare_id and digest, confirmed=true and a fresh idempotency key.",
+            "- Apply only with change.apply, using the exact server-issued prepare_id and digest, confirmed=true and a fresh idempotency key.",
             "- Do not alter the payload between prepare and apply.",
             "- For destructive or operationally critical changes, state the consequence clearly before apply.",
             "- After apply, verify the server-reported after-state, verification, errors and any rollback before claiming success.",
@@ -481,13 +481,11 @@ class _PublicBridgeView(HomeAssistantView):
             operation = outcome["operation"]
             mode = outcome["mode"]
             result = outcome["result"]
-            release_status = self._engine.release.status()
             return self.json(
                 _public_envelope(
                     request_id,
                     operation=operation,
                     mode=mode,
-                    worker_version=release_status.get("active_worker_version"),
                     result=result,
                 ),
                 headers={"Cache-Control": "no-store"},

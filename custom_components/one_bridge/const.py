@@ -5,11 +5,10 @@ from __future__ import annotations
 DOMAIN = "one_bridge"
 API_VERSION = 1
 PROTOCOL_VERSION = 2
-BOOTSTRAP_VERSION = "0.9.1"
+BOOTSTRAP_VERSION = "0.9.2"
 CATALOG_VERSION = 2
 
 PRIVATE_CONFIG_RELATIVE = "one-bridge/private/bridge-v1.json"
-RELEASE_POLICY_RELATIVE = "one-bridge/private/release-policy.json"
 BACKUP_RELATIVE = "one_bridge_backups"
 AUDIT_STORE_KEY = "one_bridge.audit"
 AUDIT_STORE_VERSION = 1

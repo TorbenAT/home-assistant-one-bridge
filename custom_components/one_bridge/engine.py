@@ -51,12 +51,11 @@ from .dispatch import (
     validate_dispatch_envelope,
 )
 from .helpers import HelperManager
-from .git_commit import GitCommitManager, default_git_commit_areas
 from .lovelace import LovelaceManager
 from .models import SuiteBridgeError
 from .models import digest_json, json_safe
 from .prepared import PreparedMutationStore
-from .release import IdempotencyStore, ReleaseManager, ReleasePolicy
+from .idempotency import IdempotencyStore
 from .registry import RegistryManager
 
 DISPATCH_OPERATION_HANDLERS = frozenset(
@@ -92,17 +91,6 @@ DISPATCH_OPERATION_HANDLERS = frozenset(
         "files.read",
         "files.search",
         "files.diff",
-        "release.status",
-        "bootstrap.status",
-        "bootstrap.stage",
-        "bootstrap.finalize",
-        "git.area.status",
-        "git.source.push",
-        "git.release_candidate.publish",
-        "git.public.status",
-        "git.public.cleanup",
-        "git.public.tag",
-        "git.preview.publish",
         "change.prepare.service",
         "change.prepare.sequence",
         "change.prepare.file",
@@ -118,11 +106,9 @@ DISPATCH_OPERATION_HANDLERS = frozenset(
         "change.prepare.config_entry",
         "change.prepare.supervisor",
         "change.prepare.core",
-        "change.prepare.git_commit",
-        "release.prepare",
     }
 )
-APPLY_OPERATION_HANDLERS = frozenset({"change.apply", "release.apply"})
+APPLY_OPERATION_HANDLERS = frozenset({"change.apply"})
 IMPLEMENTED_OPERATIONS = DISPATCH_OPERATION_HANDLERS | APPLY_OPERATION_HANDLERS
 
 
@@ -134,7 +120,6 @@ class SuiteBridgeEngine:
         authorizer: BridgeAuthorizer,
         audit: AuditLog,
         prepared: PreparedMutationStore,
-        release_policy: ReleasePolicy,
     ) -> None:
         self.hass = hass
         self.config = config
@@ -151,30 +136,7 @@ class SuiteBridgeEngine:
         self.helpers = HelperManager(
             hass, config, prepared, self.backups, audit, self.lovelace
         )
-        repository_policy = release_policy.repositories[0] if release_policy.enabled and release_policy.repositories else None
-        expected_remote_suffix = repository_policy.git_remote_suffix if repository_policy else None
-        repo_relative = release_policy.git_repo_relative if release_policy.enabled else None
-        deployment_marker_relative = release_policy.deployment_marker_relative if release_policy.enabled else None
-        self.deployment = DeploymentManager(
-            hass,
-            config,
-            expected_remote_suffix,
-            repo_relative,
-            deployment_marker_relative,
-        )
-        self.git_commits = GitCommitManager(
-            Path(hass.config.path()),
-            default_git_commit_areas(expected_remote_suffix, repo_relative),
-        )
-        self.catalog = OperationCatalog.from_path(
-            Path(__file__).with_name("operations.v2.yaml")
-        )
-        self.release = ReleaseManager(
-            release_policy,
-            prepared,
-            audit=audit,
-            run_blocking=hass.async_add_executor_job,
-        )
+        self.deployment = DeploymentManager(hass, config)
         self.change_idempotency = IdempotencyStore()
         self.implemented_operations = IMPLEMENTED_OPERATIONS
         if self.catalog.names != self.implemented_operations:
@@ -183,9 +145,7 @@ class SuiteBridgeEngine:
             raise RuntimeError(
                 f"Operation handler registry drift; missing={missing}; extra={extra}"
             )
-        self.system_operations = SystemOperations(
-            self.catalog, self.release.status, self.implemented_operations
-        )
+        self.system_operations = SystemOperations(self.catalog, self.implemented_operations)
 
     def status(self, payload: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
         del payload
@@ -206,7 +166,6 @@ class SuiteBridgeEngine:
             "config_sha256": self.config.config_sha256,
             "capabilities": sorted(self.config.capabilities),
             "raw_storage_access": False,
-            "git_mutation_api": "git:commit" in self.config.capabilities,
         }
 
     def _system_status(self, auth: BridgeAuthContext) -> dict[str, Any]:
@@ -334,38 +293,6 @@ class SuiteBridgeEngine:
             result = self._system_apply_status(arguments)
         elif operation == "system.prepare.status":
             result = await self._system_prepare_status(arguments, auth)
-        elif operation == "release.status":
-            result = self.release.status()
-        elif operation == "bootstrap.status":
-            result = await self.hass.async_add_executor_job(
-                self.git_commits.bootstrap_status
-            )
-        elif operation == "bootstrap.stage":
-            result = await self._prepare_bootstrap_stage(arguments, auth)
-        elif operation == "bootstrap.finalize":
-            result = await self._prepare_bootstrap_finalize(arguments, auth)
-        elif operation == "git.area.status":
-            result = await self.hass.async_add_executor_job(
-                self.git_commits.status, arguments["area"]
-            )
-        elif operation == "git.source.push":
-            result = await self._prepare_git_source_push(arguments, auth)
-        elif operation == "git.release_candidate.publish":
-            result = await self._prepare_git_release_candidate(arguments, auth)
-        elif operation == "git.public.status":
-            result = await self.hass.async_add_executor_job(self.git_commits.public_status)
-        elif operation == "git.public.cleanup":
-            result = await self._prepare_git_public_cleanup(arguments, auth)
-        elif operation == "git.public.tag":
-            result = await self._prepare_git_public_tag(arguments, auth)
-        elif operation == "git.preview.publish":
-            result = await self._prepare_git_preview(arguments, auth)
-        elif operation == "release.prepare":
-            result = await self.release.prepare(
-                arguments,
-                user_id=auth.user_id,
-                refresh_token_id=auth.refresh_token_id,
-            )
         elif operation == "ha.entity.search":
             result = search_entities(self.hass, arguments)
         elif operation == "ha.calendar.events":
@@ -452,8 +379,6 @@ class SuiteBridgeEngine:
             result = await self._prepare_supervisor(arguments, auth)
         elif operation == "change.prepare.core":
             result = await self._prepare_core(arguments, auth)
-        elif operation == "change.prepare.git_commit":
-            result = await self._prepare_git_commit(arguments, auth)
         else:
             raise RuntimeError(
                 f"Operation handler registry drift for dispatch: {operation}"
@@ -623,279 +548,6 @@ class SuiteBridgeEngine:
         item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="core.action", normalized_change=material, material=material, risk=risk)
         return self._prepared_response(item)
 
-    async def _prepare_git_commit(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
-        material = await self.hass.async_add_executor_job(
-            self.git_commits.prepare, arguments["area"], arguments["summary"]
-        )
-        item = await self.prepared.create(
-            user_id=auth.user_id,
-            refresh_token_id=auth.refresh_token_id,
-            operation="git.commit",
-            normalized_change={
-                "area": material["area"],
-                "branch": material["branch"],
-                "head": material["head"],
-                "summary": material["summary"],
-                "paths": material["paths"],
-                "diff_sha256": material["diff_sha256"],
-            },
-            material=material,
-            risk="high",
-        )
-        await self.audit.append({
-            "operation": "change.prepare.git_commit",
-            "user_id": auth.user_id,
-            "prepare_id": item.prepare_id,
-            "area": material["area"],
-            "head": material["head"],
-            "paths": material["paths"],
-            "result": "prepared",
-        })
-        return self._prepared_response(item)
-
-    async def _prepare_git_source_push(
-        self, arguments: dict[str, Any], auth: BridgeAuthContext
-    ) -> dict[str, Any]:
-        material = await self.hass.async_add_executor_job(
-            self.git_commits.prepare_source_push,
-            arguments["expected_source_commit"],
-        )
-        item = await self.prepared.create(
-            user_id=auth.user_id,
-            refresh_token_id=auth.refresh_token_id,
-            operation="git.source.push",
-            normalized_change={
-                "area": material["area"],
-                "branch": material["branch"],
-                "source_commit": material["head"],
-                "remote": material["remote"],
-                "remote_ref": material["remote_ref"],
-                "remote_before": material["remote_before"],
-                "force": False,
-            },
-            material=material,
-            risk="high",
-        )
-        await self.audit.append(
-            {
-                "operation": "git.source.push",
-                "user_id": auth.user_id,
-                "prepare_id": item.prepare_id,
-                "source_commit": material["head"],
-                "remote_before": material["remote_before"],
-                "result": "prepared",
-            }
-        )
-        return self._prepared_response(item)
-
-    async def _prepare_git_release_candidate(
-        self, arguments: dict[str, Any], auth: BridgeAuthContext
-    ) -> dict[str, Any]:
-        material = await self.hass.async_add_executor_job(
-            self.git_commits.prepare_release_candidate,
-            arguments["expected_source_commit"],
-        )
-        item = await self.prepared.create(
-            user_id=auth.user_id,
-            refresh_token_id=auth.refresh_token_id,
-            operation="git.release_candidate.publish",
-            normalized_change={
-                "area": material["area"],
-                "branch": material["branch"],
-                "source_commit": material["head"],
-                "remote": material["remote"],
-                "remote_ref": material["remote_ref"],
-                "remote_before": material["remote_before"],
-                "force": False,
-            },
-            material=material,
-            risk="high",
-        )
-        await self.audit.append({
-            "operation": "git.release_candidate.publish",
-            "user_id": auth.user_id,
-            "prepare_id": item.prepare_id,
-            "source_commit": material["head"],
-            "remote_before": material["remote_before"],
-            "result": "prepared",
-        })
-        return self._prepared_response(item)
-
-    async def _prepare_git_public_cleanup(
-        self, arguments: dict[str, Any], auth: BridgeAuthContext
-    ) -> dict[str, Any]:
-        material = await self.hass.async_add_executor_job(
-            self.git_commits.prepare_public_cleanup,
-            arguments["version"],
-            arguments["expected_source_commit"],
-        )
-        item = await self.prepared.create(
-            user_id=auth.user_id,
-            refresh_token_id=auth.refresh_token_id,
-            operation="git.public.cleanup",
-            normalized_change={
-                "repository": "TorbenAT/home-assistant-one-bridge",
-                "source_commit": material["head"],
-                "version": material["version"],
-                "public_head": material["public_head"],
-                "public_root": material["public_root"],
-                "commit_count_before": material["public_commit_count"],
-                "commit_count_after": material["target_commit_count"],
-                "recent_commits": material["public_recent_commits"],
-                "tags_before": material["public_tags"],
-                "force_with_lease": True,
-                "tag_created": False,
-            },
-            material=material,
-            risk="high",
-        )
-        await self.audit.append({
-            "operation": "git.public.cleanup",
-            "user_id": auth.user_id,
-            "prepare_id": item.prepare_id,
-            "source_commit": material["head"],
-            "public_head": material["public_head"],
-            "commit_count_before": material["public_commit_count"],
-            "result": "prepared",
-        })
-        return self._prepared_response(item)
-
-    async def _prepare_git_public_tag(
-        self, arguments: dict[str, Any], auth: BridgeAuthContext
-    ) -> dict[str, Any]:
-        material = await self.hass.async_add_executor_job(
-            self.git_commits.prepare_public_tag,
-            arguments["version"],
-            arguments["expected_public_commit"],
-        )
-        item = await self.prepared.create(
-            user_id=auth.user_id,
-            refresh_token_id=auth.refresh_token_id,
-            operation="git.public.tag",
-            normalized_change={
-                "repository": material["repository"],
-                "version": material["version"],
-                "tag": material["tag"],
-                "public_commit": material["public_commit"],
-                "commit_count": material["commit_count"],
-                "tags_before": material["tags_before"],
-                "force": False,
-                "final_tag": True,
-            },
-            material=material,
-            risk="high",
-        )
-        await self.audit.append({
-            "operation": "git.public.tag",
-            "user_id": auth.user_id,
-            "prepare_id": item.prepare_id,
-            "tag": material["tag"],
-            "public_commit": material["public_commit"],
-            "result": "prepared",
-        })
-        return self._prepared_response(item)
-
-    async def _prepare_git_preview(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
-        material = await self.hass.async_add_executor_job(
-            self.git_commits.prepare_preview, arguments["version"]
-        )
-        item = await self.prepared.create(
-            user_id=auth.user_id,
-            refresh_token_id=auth.refresh_token_id,
-            operation="git.preview.publish",
-            normalized_change={
-                "repository": "TorbenAT/home-assistant-one-bridge",
-                "area": material["area"],
-                "branch": material["branch"],
-                "source_commit": material["head"],
-                "version": material["version"],
-                "publisher_sha256": material["script_sha256"],
-                "final_release": False,
-                "tag_created": False,
-            },
-            material=material,
-            risk="high",
-        )
-        await self.audit.append(
-            {
-                "operation": "git.preview.publish",
-                "user_id": auth.user_id,
-                "prepare_id": item.prepare_id,
-                "source_commit": material["head"],
-                "version": material["version"],
-                "publisher_sha256": material["script_sha256"],
-                "result": "prepared",
-            }
-        )
-        return self._prepared_response(item)
-
-    async def _prepare_bootstrap_stage(
-        self, arguments: dict[str, Any], auth: BridgeAuthContext
-    ) -> dict[str, Any]:
-        material = await self.hass.async_add_executor_job(
-            self.git_commits.prepare_bootstrap_stage,
-            arguments["expected_source_commit"],
-        )
-        item = await self.prepared.create(
-            user_id=auth.user_id,
-            refresh_token_id=auth.refresh_token_id,
-            operation="bootstrap.stage",
-            normalized_change={
-                "source_commit": material["head"],
-                "version": material["version"],
-                "install_sha256": material["install_sha256"],
-                "activate_sha256": material["activate_sha256"],
-                "restart_performed": False,
-            },
-            material=material,
-            risk="high",
-        )
-        await self.audit.append(
-            {
-                "operation": "bootstrap.stage",
-                "user_id": auth.user_id,
-                "prepare_id": item.prepare_id,
-                "source_commit": material["head"],
-                "version": material["version"],
-                "result": "prepared",
-            }
-        )
-        return self._prepared_response(item)
-
-    async def _prepare_bootstrap_finalize(
-        self, arguments: dict[str, Any], auth: BridgeAuthContext
-    ) -> dict[str, Any]:
-        material = await self.hass.async_add_executor_job(
-            self.git_commits.prepare_bootstrap_finalize,
-            arguments["expected_source_commit"],
-            BOOTSTRAP_VERSION,
-        )
-        item = await self.prepared.create(
-            user_id=auth.user_id,
-            refresh_token_id=auth.refresh_token_id,
-            operation="bootstrap.finalize",
-            normalized_change={
-                "source_commit": material["head"],
-                "version": material["version"],
-                "loaded_version": material["loaded_version"],
-                "pending_sha256": material["pending_sha256"],
-                "restart_performed": False,
-            },
-            material=material,
-            risk="high",
-        )
-        await self.audit.append(
-            {
-                "operation": "bootstrap.finalize",
-                "user_id": auth.user_id,
-                "prepare_id": item.prepare_id,
-                "source_commit": material["head"],
-                "version": material["version"],
-                "result": "prepared",
-            }
-        )
-        return self._prepared_response(item)
-
     async def apply_request(
         self, payload: dict[str, Any], auth: BridgeAuthContext
     ) -> dict[str, Any]:
@@ -911,13 +563,7 @@ class SuiteBridgeEngine:
                 f"{required_capability}.",
                 403,
             )
-        if operation == "release.apply":
-            result = await self.release.apply(
-                arguments,
-                user_id=auth.user_id,
-                refresh_token_id=auth.refresh_token_id,
-            )
-        elif operation == "change.apply":
+        if operation == "change.apply":
             key = arguments["idempotency_key"]
             fingerprint = json.dumps(
                 {
@@ -1268,97 +914,6 @@ class SuiteBridgeEngine:
                 else:
                     endpoint = f"/{resource}s/{item.material.get('target') or action}"
                 result = await async_ws_command(self.hass, auth.refresh_token_id, {"type": "supervisor/api", "endpoint": endpoint, "method": "post", "data": item.material.get("options") or {}})
-            elif item.operation == "git.commit":
-                result = await self.hass.async_add_executor_job(
-                    self.git_commits.commit, item.material
-                )
-            elif item.operation == "git.source.push":
-                result = await self.hass.async_add_executor_job(
-                    self.git_commits.push_source, item.material
-                )
-                await self.audit.append(
-                    {
-                        "operation": item.operation,
-                        "user_id": auth.user_id,
-                        "prepare_id": prepare_id,
-                        "result": "pushed",
-                        "details": json_safe(result),
-                    }
-                )
-            elif item.operation == "git.release_candidate.publish":
-                result = await self.hass.async_add_executor_job(
-                    self.git_commits.publish_release_candidate, item.material
-                )
-                await self.audit.append({
-                    "operation": item.operation,
-                    "user_id": auth.user_id,
-                    "prepare_id": prepare_id,
-                    "result": "published",
-                    "details": json_safe(result),
-                })
-            elif item.operation == "git.public.cleanup":
-                result = await self.hass.async_add_executor_job(
-                    self.git_commits.cleanup_public, item.material
-                )
-                await self.audit.append({
-                    "operation": item.operation,
-                    "user_id": auth.user_id,
-                    "prepare_id": prepare_id,
-                    "result": "cleaned",
-                    "details": json_safe(result),
-                })
-            elif item.operation == "git.public.tag":
-                result = await self.hass.async_add_executor_job(
-                    self.git_commits.create_public_tag, item.material
-                )
-                await self.audit.append({
-                    "operation": item.operation,
-                    "user_id": auth.user_id,
-                    "prepare_id": prepare_id,
-                    "result": "tagged",
-                    "details": json_safe(result),
-                })
-            elif item.operation == "git.preview.publish":
-                result = await self.hass.async_add_executor_job(
-                    self.git_commits.publish_preview, item.material
-                )
-                await self.audit.append(
-                    {
-                        "operation": item.operation,
-                        "user_id": auth.user_id,
-                        "prepare_id": prepare_id,
-                        "result": "published",
-                        "details": json_safe(result),
-                    }
-                )
-            elif item.operation == "bootstrap.stage":
-                result = await self.hass.async_add_executor_job(
-                    self.git_commits.stage_bootstrap, item.material
-                )
-                await self.audit.append(
-                    {
-                        "operation": item.operation,
-                        "user_id": auth.user_id,
-                        "prepare_id": prepare_id,
-                        "result": "staged",
-                        "details": json_safe(result),
-                    }
-                )
-            elif item.operation == "bootstrap.finalize":
-                result = await self.hass.async_add_executor_job(
-                    self.git_commits.finalize_bootstrap,
-                    item.material,
-                    BOOTSTRAP_VERSION,
-                )
-                await self.audit.append(
-                    {
-                        "operation": item.operation,
-                        "user_id": auth.user_id,
-                        "prepare_id": prepare_id,
-                        "result": "finalized",
-                        "details": json_safe(result),
-                    }
-                )
             else:
                 raise SuiteBridgeError(
                     "UNKNOWN_PREPARED_OPERATION",

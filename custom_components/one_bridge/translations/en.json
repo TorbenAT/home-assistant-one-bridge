@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Configure One Bridge",
-        "description": "Connect this Home Assistant installation to a ChatGPT GPT Action. Use target for normal HACS installations; source is an advanced release-source role.",
+        "description": "Connect this Home Assistant installation to a ChatGPT GPT Action. This public HACS build is target-only.",
         "data": {
           "role": "Installation role",
           "public_base_url": "Public Home Assistant URL",

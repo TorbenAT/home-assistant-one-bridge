@@ -92,4 +92,30 @@ assert "OpenAPIView(engine)" in init_source
 assert "GPTInstructionsView(engine)" in init_source
 assert not list(suite.rglob("__pycache__"))
 assert not list(suite.rglob("*.pyc"))
+for source_only_name in ("git_commit.py", "release.py", "worker_loader.py"):
+    assert not (suite / source_only_name).exists(), source_only_name
+catalog = json.loads((suite / "operations.v2.yaml").read_text(encoding="utf-8"))
+assert all(
+    item.get("capability") not in {"deployment:source", "git:commit"}
+    for item in catalog["operations"]
+)
+installed_text = "
+".join(
+    path.read_text(encoding="utf-8", errors="replace")
+    for path in suite.rglob("*")
+    if path.is_file() and path.suffix.lower() in {".py", ".json", ".yaml", ".yml", ".md", ".txt"}
+)
+for marker in (
+    "deployment:source",
+    "git:commit",
+    "release.prepare",
+    "release.apply",
+    "bootstrap.status",
+    "git.preview.publish",
+    "change.prepare.git_commit",
+    "ReleaseManager",
+    "GitCommitManager",
+    "WorkerLoader",
+):
+    assert marker not in installed_text, marker
 print("OK: public HACS layout and onboarding surface")

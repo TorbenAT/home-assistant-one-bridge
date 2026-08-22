@@ -16,11 +16,10 @@ from homeassistant.helpers.typing import ConfigType
 from .audit import AuditLog
 from .auth import BridgeAuthorizer, OAuthClientMetadataView, OAuthRevokeProxyView, OAuthTokenProxyView
 from .config import async_load_config
-from .const import API_VERSION, DOMAIN, PRIVATE_CONFIG_RELATIVE, RELEASE_POLICY_RELATIVE
+from .const import API_VERSION, DOMAIN, PREPARE_TTL_SECONDS, PRIVATE_CONFIG_RELATIVE
 from .engine import SuiteBridgeEngine
 from .models import digest_json
 from .prepared import PreparedMutationStore
-from .release import ReleasePolicy
 from .views import (
     ApplyView,
     BackupListView,
@@ -292,15 +291,8 @@ async def _async_initialize(hass: HomeAssistant) -> bool:
     authorizer = BridgeAuthorizer(hass, bridge_config)
     audit = AuditLog(hass)
     await audit.async_load()
-    release_policy = ReleasePolicy.from_path(
-        Path(hass.config.path(RELEASE_POLICY_RELATIVE))
-    )
-    prepared = PreparedMutationStore(
-        ttl_seconds=release_policy.prepare_ttl_seconds
-    )
-    engine = SuiteBridgeEngine(
-        hass, bridge_config, authorizer, audit, prepared, release_policy
-    )
+    prepared = PreparedMutationStore(ttl_seconds=PREPARE_TTL_SECONDS)
+    engine = SuiteBridgeEngine(hass, bridge_config, authorizer, audit, prepared)
     oauth_client_view = OAuthClientMetadataView(bridge_config)
     oauth_token_view = OAuthTokenProxyView(hass, bridge_config)
     oauth_revoke_view = OAuthRevokeProxyView(hass, bridge_config)
@@ -309,7 +301,6 @@ async def _async_initialize(hass: HomeAssistant) -> bool:
         "authorizer": authorizer,
         "audit": audit,
         "prepared": prepared,
-        "release_policy": release_policy,
         "engine": engine,
         "oauth_views": (
             oauth_client_view,

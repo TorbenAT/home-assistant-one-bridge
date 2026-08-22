@@ -124,19 +124,10 @@ class DeploymentManager:
                 Path(self.hass.config.path(self.deployment_marker_relative))
             )
         script_root = repo / "scripts"
-        role_commands = (
-            {
-                "prepare": f"sh {script_root / 'git-source.sh'} prepare vX.Y.Z",
-                "push_review": f"sh {script_root / 'git-source.sh'} push \"<beskrivelse>\" \"BEKRÆFT PUSH REVIEW-BRANCH\"",
-                "release": f"sh {script_root / 'git-source.sh'} release vX.Y.Z \"BEKRÆFT RELEASE TIL MAIN\"",
-                "stage": f"sh {script_root / 'git-source.sh'} stage vX.Y.Z \"BEKRÆFT STAGE FRA GIT\"",
-            }
-            if self.config.role == "source"
-            else {
-                "stage_update": f"sh {script_root / 'git-target.sh'} stage vX.Y.Z \"BEKRÆFT TARGET STAGE FRA GIT\"",
-                "activate": f"sh {script_root / 'git-target.sh'} activate \"BEKRÆFT AKTIVER BRIDGE SUITE\"",
-            }
-        )
+        role_commands = {
+            "stage_update": f"sh {script_root / 'git-target.sh'} stage vX.Y.Z \"BEKRÆFT TARGET STAGE FRA GIT\"",
+            "activate": f"sh {script_root / 'git-target.sh'} activate \"BEKRÆFT AKTIVER BRIDGE SUITE\"",
+        }
         return {
             "available": True,
             "role": self.config.role,
@@ -149,11 +140,7 @@ class DeploymentManager:
             "tags": self._tags(git_dir),
             "last_deployment": deployment,
             "commands": role_commands,
-            "mutation_api": (
-                "allowlisted prepare/apply commit; push remains unavailable"
-                if self.config.role == "source"
-                else "unavailable for this Bridge role"
-            ),
+            "mutation_api": "unavailable for this Bridge role",
         }
 
     async def status(self, payload: dict[str, Any]) -> dict[str, Any]:

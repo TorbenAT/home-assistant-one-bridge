@@ -186,7 +186,7 @@ def _gpt_instructions(raw: dict[str, Any]) -> str:
         lines.extend(
             [
                 "Every mutation must be prepared first. Inspect target, before-state, requested change, diff, validation, risk, prepare_id, digest and expiry.",
-                "Apply only with change.apply or release.apply using the exact prepare_id and digest, confirmed=true and a fresh idempotency key.",
+                "Apply only with change.apply using the exact prepare_id and digest, confirmed=true and a fresh idempotency key.",
                 "Do not change the payload between prepare and apply. Verify after-state, verification and rollback before claiming success.",
             ]
         )
