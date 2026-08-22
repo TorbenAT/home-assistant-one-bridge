@@ -45,7 +45,7 @@ assert '"target": frozenset(COMMON_CAPABILITIES | {"deployment:target"})' in con
 assert manifest["documentation"] == "https://github.com/TorbenAT/home-assistant-one-bridge"
 assert manifest["issue_tracker"] == "https://github.com/TorbenAT/home-assistant-one-bridge/issues"
 assert hacs["name"] == "One Bridge"
-assert hacs["homeassistant"] == "2026.8.0"
+assert hacs["homeassistant"] == metadata["homeassistant_min"]
 assert (root / "README.md").is_file()
 assert (root / "LICENSE").is_file()
 assert (suite / "brand" / "icon.png").stat().st_size > 100
