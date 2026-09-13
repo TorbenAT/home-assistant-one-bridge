@@ -7,28 +7,51 @@ from typing import Any
 from .models import SuiteBridgeError, json_safe
 
 
-def _registry_metadata(hass: Any, entity_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _registry_metadata(
+    hass: Any,
+    entity_id: str,
+    *,
+    entity_registry: Any = None,
+    device_registry: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
-        from homeassistant.helpers import device_registry as dr
-        from homeassistant.helpers import entity_registry as er
+        if entity_registry is None or device_registry is None:
+            from homeassistant.helpers import device_registry as dr
+            from homeassistant.helpers import entity_registry as er
 
-        entity = er.async_get(hass).async_get(entity_id)
+            if entity_registry is None:
+                entity_registry = er.async_get(hass)
+            if device_registry is None:
+                device_registry = dr.async_get(hass)
+        entity = entity_registry.async_get(entity_id)
         if entity is None:
             return {}, {}
         entity_data = json_safe(vars(entity)) if hasattr(entity, "__dict__") else {}
-        device = dr.async_get(hass).async_get(getattr(entity, "device_id", None))
+        device = device_registry.async_get(getattr(entity, "device_id", None))
         device_data = json_safe(vars(device)) if device is not None and hasattr(device, "__dict__") else {}
         return entity_data, device_data
     except Exception:
         return {}, {}
 
 
-def _record(hass: Any, entity_id: str, *, include_attributes: bool = True) -> dict[str, Any] | None:
+def _record(
+    hass: Any,
+    entity_id: str,
+    *,
+    include_attributes: bool = True,
+    entity_registry: Any = None,
+    device_registry: Any = None,
+) -> dict[str, Any] | None:
     state = hass.states.get(entity_id)
     if state is None:
         return None
     attrs = dict(getattr(state, "attributes", {}) or {})
-    entity_data, device_data = _registry_metadata(hass, entity_id)
+    entity_data, device_data = _registry_metadata(
+        hass,
+        entity_id,
+        entity_registry=entity_registry,
+        device_registry=device_registry,
+    )
     return {
         "entity_id": entity_id,
         "state": str(getattr(state, "state", "unknown")),
@@ -45,14 +68,33 @@ def _record(hass: Any, entity_id: str, *, include_attributes: bool = True) -> di
 def search_entities(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     query = str(arguments["query"]).casefold().strip()
     domains = {str(value).casefold().strip() for value in arguments.get("domains", [])}
-    limit = int(arguments.get("limit", 50))
+    # Contract alignment: ha.entity.search caps limit at 200.
+    limit = min(max(int(arguments.get("limit", 50)), 1), 200)
     matches: list[dict[str, Any]] = []
+    # Hoist registry lookups so the scan does one lookup instead of two per
+    # candidate. Failure to resolve registries degrades to no registry metadata
+    # (same as the per-record path) rather than failing the whole search.
+    entity_registry = device_registry = None
+    try:
+        from homeassistant.helpers import device_registry as dr
+        from homeassistant.helpers import entity_registry as er
+
+        entity_registry = er.async_get(hass)
+        device_registry = dr.async_get(hass)
+    except Exception:
+        entity_registry = device_registry = None
     for state in hass.states.async_all():
         entity_id = str(state.entity_id)
         domain = entity_id.split(".", 1)[0].casefold()
         if domains and domain not in domains:
             continue
-        record = _record(hass, entity_id, include_attributes=False)
+        record = _record(
+            hass,
+            entity_id,
+            include_attributes=False,
+            entity_registry=entity_registry,
+            device_registry=device_registry,
+        )
         if record is None:
             continue
         haystack = " ".join(

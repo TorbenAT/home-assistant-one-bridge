@@ -4,7 +4,7 @@ One Bridge is a Home Assistant custom integration for a typed, allowlisted GPT A
 
 ## Status
 
-The public `0.x` series is a preview line. It is intended for real testing, but configuration, UI and API details may still change before `1.0.0`.
+One Bridge is currently pre-1.0. Tagged public releases use the public product version series, while development previews are published on a separate `preview` branch and are never mixed into `main` history.
 
 ## One Bridge vs. the private Developer Bridge
 
@@ -71,7 +71,7 @@ One Bridge is read-first. Mutations use a server-generated prepare/apply flow wi
 2. Install **One Bridge**.
 3. Restart Home Assistant.
 4. Go to **Settings → Devices & services → Add integration** and select **One Bridge**.
-5. Use the `target` role for ordinary HACS installations. The `source` role is an advanced release-source mode and requires a local release policy that is not included in this public repository.
+5. Complete the setup in Home Assistant. The public HACS build is target-only; the private developer/source role is not part of this repository.
 
 ## GPT Action setup
 

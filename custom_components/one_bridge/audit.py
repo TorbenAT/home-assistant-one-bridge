@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
@@ -41,6 +42,10 @@ class AuditLog:
         self._store: Store[dict[str, Any]] = Store(
             hass, AUDIT_STORE_VERSION, AUDIT_STORE_KEY
         )
+        # Serializes the hash-chain critical section: two concurrent appends
+        # must never read the same _last_hash or interleave their persisted
+        # order, or the chain silently forks.
+        self._chain_lock = asyncio.Lock()
         self._entries: list[dict[str, Any]] = []
         self._last_hash = "0" * 64
 
@@ -68,23 +73,24 @@ class AuditLog:
             for key, value in entry.items()
             if key.casefold() not in _AUDIT_PAYLOAD_FIELDS
         }
-        item = {
-            "audit_id": new_id("audit2"),
-            "timestamp": utc_now_iso(),
-            **redact(safe_entry),
-            **redact(_AUDIT_CONTEXT.get()),
-            "previous_hash": self._last_hash,
-        }
-        item["audit_hash"] = hashlib.sha256(
-            canonical_json(item).encode("utf-8")
-        ).hexdigest()
-        self._last_hash = item["audit_hash"]
-        self._entries.append(item)
-        self._entries = self._entries[-AUDIT_MAX_ENTRIES:]
-        try:
-            await self._store.async_save({"entries": self._entries})
-        except Exception:
-            _LOGGER.exception("Kunne ikke gemme One Bridge auditloggen")
+        async with self._chain_lock:
+            item = {
+                "audit_id": new_id("audit2"),
+                "timestamp": utc_now_iso(),
+                **redact(safe_entry),
+                **redact(_AUDIT_CONTEXT.get()),
+                "previous_hash": self._last_hash,
+            }
+            item["audit_hash"] = hashlib.sha256(
+                canonical_json(item).encode("utf-8")
+            ).hexdigest()
+            self._last_hash = item["audit_hash"]
+            self._entries.append(item)
+            self._entries = self._entries[-AUDIT_MAX_ENTRIES:]
+            try:
+                await self._store.async_save({"entries": self._entries})
+            except Exception:
+                _LOGGER.exception("Kunne ikke gemme One Bridge auditloggen")
         self.hass.bus.async_fire("one_bridge_audit", item)
         if item.get("result") == "executed":
             persistent_notification.async_create(

@@ -89,7 +89,8 @@ assert "applyHomeAssistantBridgeChange" in views_source
 assert views_source.count('"x-openai-isConsequential": False') == 1
 assert views_source.count('"x-openai-isConsequential": True') == 1
 assert '"maximum": 120' not in views_source
-assert '"maximum": 180' not in views_source
+assert views_source.count('"maximum": 180') == 2
+assert views_source.count('"default": 60') == 1
 assert '"schema_sha256"' in views_source
 assert "config.config_sha256" not in views_source
 assert "OpenAPIView(engine)" in init_source
@@ -102,6 +103,10 @@ engine_text = (suite / "engine.py").read_text(encoding="utf-8")
 assert "OperationCatalog.from_path(" not in engine_text
 assert "self.catalog = catalog" in engine_text
 assert "enforce_capability_policy(" in engine_text
+assert "from .idempotency import IdempotencyStore" in engine_text
+idempotency_text = (suite / "idempotency.py").read_text(encoding="utf-8")
+assert "IDEMPOTENCY_BUSY" in idempotency_text
+assert 'if not existing["in_flight"]' in idempotency_text
 assert "enforce_capability_policy(" in (suite / "auth.py").read_text(encoding="utf-8")
 assert "code_verifier" in (suite / "auth.py").read_text(encoding="utf-8")
 assert "async_add_executor_job(\n        OperationCatalog.from_path," in init_source

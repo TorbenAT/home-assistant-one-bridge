@@ -15,10 +15,11 @@ from homeassistant.helpers.typing import ConfigType
 
 from .audit import AuditLog
 from .auth import BridgeAuthorizer, OAuthClientMetadataView, OAuthRevokeProxyView, OAuthTokenProxyView
-from .config import async_load_config
+from .config import async_load_config, setup_access_token
 from .const import API_VERSION, DOMAIN, PREPARE_TTL_SECONDS, PRIVATE_CONFIG_RELATIVE
 from .dispatch import OperationCatalog
 from .engine import SuiteBridgeEngine
+from .mail_runtime import activate_mail_feature
 from .models import digest_json
 from .prepared import PreparedMutationStore
 from .views import (
@@ -47,6 +48,8 @@ from .views import (
     SuiteStatusView,
     _allowed_operation_contracts,
     _openapi_document,
+    _setup_token_authorized,
+    _setup_token_denied,
     build_gpt_instructions,
 )
 
@@ -141,7 +144,8 @@ class OpenAPIView(_BaseOpenAPIView):
         document, fingerprint = _public_openapi_document(self._engine)
         return web.Response(
             text=json.dumps(document, indent=2) + "\n",
-            content_type="application/yaml",
+            # The body is JSON (json.dumps); label it as JSON so clients parse it correctly.
+            content_type="application/json",
             headers={
                 "Cache-Control": "no-store",
                 "X-One-Bridge-Schema": fingerprint,
@@ -153,7 +157,10 @@ class GPTInstructionsView(_BaseGPTInstructionsView):
     """Generated GPT instructions matching the final public OpenAPI fingerprint."""
 
     async def get(self, request: web.Request) -> web.Response:
-        del request
+        # Same gate as the base view: this page discloses installation URLs and
+        # configuration, so the derived setup access token is required.
+        if not _setup_token_authorized(request, self._engine.config):
+            return _setup_token_denied()
         text, fingerprint = _public_gpt_instructions(self._engine)
         return web.Response(
             text=text,
@@ -226,9 +233,14 @@ class GPTSetupView(_BaseGPTSetupView):
     """Copy-friendly GPT setup page without exposing the client secret."""
 
     async def get(self, request: web.Request) -> web.Response:
-        del request
+        # Same gate as the base view: the setup page discloses installation
+        # URLs and non-secret configuration, so it must not be anonymous.
+        if not _setup_token_authorized(request, self._engine.config):
+            return _setup_token_denied()
         config = self._engine.config
         base = config.public_base_url.rstrip("/")
+        access = setup_access_token(config.client_secret_sha256)
+        suffix = f"?token={access}" if access else ""
         public_instructions, _ = _public_gpt_instructions(self._engine)
         values = [
             ("client-id", "Client ID", config.oauth_client_id),
@@ -236,7 +248,7 @@ class GPTSetupView(_BaseGPTSetupView):
             ("token-url", "Token URL", f"{base}/api/one_bridge/v1/oauth/token"),
             ("scope", "Scope", "homeassistant"),
             ("schema-url", "Schema URL", f"{base}/api/one_bridge/v1/openapi.yaml"),
-            ("instructions-url", "Instructions URL", f"{base}/api/one_bridge/v1/instructions.txt"),
+            ("instructions-url", "Instructions URL", f"{base}/api/one_bridge/v1/instructions.txt{suffix}"),
             ("privacy-url", "Privacy Policy URL", f"{base}/api/one_bridge/v1/privacy"),
             ("gpt-instructions", "GPT Instructions", public_instructions.rstrip()),
         ]
@@ -300,6 +312,7 @@ async def _async_initialize(hass: HomeAssistant) -> bool:
     engine = SuiteBridgeEngine(
         hass, bridge_config, authorizer, audit, prepared, catalog
     )
+    activate_mail_feature(hass, catalog, engine)
     oauth_client_view = OAuthClientMetadataView(bridge_config)
     oauth_token_view = OAuthTokenProxyView(hass, bridge_config)
     oauth_revoke_view = OAuthRevokeProxyView(hass, bridge_config)
@@ -357,10 +370,37 @@ async def _async_initialize(hass: HomeAssistant) -> bool:
     return True
 
 
+async def _async_ensure_config_entry(hass: HomeAssistant) -> None:
+    if hass.config_entries.async_entries(DOMAIN):
+        return
+    bridge_config = await async_load_config(hass)
+    if not bridge_config.enabled:
+        return
+    try:
+        await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": "import"},
+            data={
+                "installation_id": bridge_config.installation_id,
+                "role": bridge_config.role,
+                "public_base_url": bridge_config.public_base_url,
+                "permission_preset": bridge_config.permission_preset,
+            },
+        )
+    except Exception:
+        _LOGGER.exception("Legacy One Bridge config-entry import failed")
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     private_config = Path(hass.config.path(PRIVATE_CONFIG_RELATIVE))
     if DOMAIN not in config and not private_config.exists():
         return True
+    if hass.config_entries.async_entries(DOMAIN):
+        return True
+    if private_config.exists():
+        await _async_ensure_config_entry(hass)
+        if hass.config_entries.async_entries(DOMAIN):
+            return True
     return await _async_initialize(hass)
 
 
@@ -370,5 +410,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Design intent: unload is not supported. The HTTP views, stores and the WS
+    # client are module-level singletons registered against hass; returning True
+    # would leave dangling routes/stores behind. HA treats False as
+    # "unload unsupported", so reloads surface an explicit error instead of a
+    # half-torn-down integration.
     del hass, entry
     return False

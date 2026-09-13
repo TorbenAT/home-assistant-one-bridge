@@ -63,7 +63,11 @@
           "read_only_lockdown": "Read-only lockdown",
           "rotate_client_secret": "Generate a new OAuth client secret",
           "internal_ws_url": "Internal WebSocket URL (blank = Auto)",
-          "internal_ws_verify_ssl": "Verify SSL for internal WebSocket"
+          "internal_ws_verify_ssl": "Verify SSL for internal WebSocket",
+          "mail_signature_sender": "Mail signature sender address",
+          "mail_signature_standard": "Standard mail signature",
+          "mail_signature_phone": "Mail signature with phone number",
+          "mail_signature_default_profile": "Default mail signature profile"
         },
         "data_description": {
           "callback_url": "Paste the callback URL shown by the GPT Action editor. A callback-only change is saved directly when you submit this screen. Leave blank until the editor provides one.",
@@ -73,7 +77,11 @@
           "read_only_lockdown": "Block prepare/apply mutations while keeping allowed read operations available.",
           "rotate_client_secret": "Generates a replacement secret and shows it once on the next screen. The existing secret stays active unless you confirm the staged settings.",
           "internal_ws_url": "Optional loopback WebSocket endpoint ending in /api/websocket; leave blank for Auto.",
-          "internal_ws_verify_ssl": "Verify TLS certificates when the internal WebSocket uses wss://."
+          "internal_ws_verify_ssl": "Verify TLS certificates when the internal WebSocket uses wss://.",
+          "mail_signature_sender": "Only mail sent from this exact SMTP sender gets an automatic signature.",
+          "mail_signature_standard": "Multiline signature used for normal messages.",
+          "mail_signature_phone": "Multiline signature used when the recipient should also get your phone number.",
+          "mail_signature_default_profile": "Used automatically when a mail prepare does not explicitly choose another profile."
         }
       },
       "capabilities": {
@@ -109,6 +117,13 @@
         "read_only": "All read-only areas",
         "advanced": "Advanced - all role capabilities",
         "custom": "Custom"
+      }
+    },
+    "mail_signature_profile": {
+      "options": {
+        "standard": "Standard",
+        "phone": "With phone number",
+        "none": "No automatic signature"
       }
     },
     "capability": {

@@ -343,6 +343,14 @@ class LovelaceManager:
             source_config = None
             if action == "update":
                 projected = {**current, **normalized}
+                # Collision guard: renaming onto another dashboard's url_path
+                # would only fail downstream at apply (or worse, silently
+                # duplicate). Reject it at prepare like create/clone does.
+                if any(
+                    row is not current and row.get("url_path") == projected.get("url_path")
+                    for row in dashboards
+                ):
+                    raise SuiteBridgeError("DASHBOARD_EXISTS", "url_path findes allerede.", 409)
                 normalized = {
                     key: value
                     for key, value in projected.items()
@@ -422,7 +430,38 @@ class LovelaceManager:
             dashboard_id = str(result.get("id", ""))
             if action == "clone":
                 new_dashboard, _ = self._dashboard(material["metadata"]["url_path"])
-                await new_dashboard.async_save(deepcopy(material["source_config"]))
+                try:
+                    await new_dashboard.async_save(deepcopy(material["source_config"]))
+                except Exception as err:
+                    # Compensation: the metadata row exists but the cloned
+                    # configuration never landed. Delete the half-created
+                    # dashboard so apply does not leave an empty orphan; the
+                    # original failure stays the reported error either way.
+                    compensation: dict[str, Any] = {"attempted": True}
+                    try:
+                        await async_ws_command(
+                            self.hass,
+                            refresh_token_id,
+                            {
+                                "type": "lovelace/dashboards/delete",
+                                "dashboard_id": dashboard_id,
+                            },
+                        )
+                        compensation["deleted"] = True
+                    except Exception as cleanup_err:
+                        compensation["deleted"] = False
+                        compensation["cleanup_error"] = type(cleanup_err).__name__
+                    raise SuiteBridgeError(
+                        "DASHBOARD_CLONE_SAVE_FAILED",
+                        "Klonen blev oprettet, men konfigurationen kunne ikke gemmes.",
+                        500,
+                        details={
+                            "applied": not compensation.get("deleted"),
+                            "dashboard_id": dashboard_id,
+                            "compensation": compensation,
+                            "cause": type(err).__name__,
+                        },
+                    ) from err
         elif action == "update":
             if current is None or digest_json(current) != material["before_sha256"]:
                 raise SuiteBridgeError(

@@ -33,7 +33,16 @@
       "capability": "status:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {},
+        "result_format": "Systemoverblik: versioner, oppetid, rolle, praeset og kapabiliteter.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Svarfeltet self er serverens egen rapport."
+      }
     },
     {
       "name": "system.catalog",
@@ -64,7 +73,18 @@
       "capability": "status:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "compact": false
+        },
+        "result_format": "Katalogposten pr. operation inklusiv argumentkontrakt (required/optional/enums) og operator-eksempel.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Kald igen med operation=<navn> for at se faeltene for netop den operation."
+      }
     },
     {
       "name": "system.capabilities",
@@ -80,7 +100,16 @@
       "capability": "status:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {},
+        "result_format": "Aktive kapabiliteter, rolle og lockdown-tilstand.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Skal matche system.status.capabilities."
+      }
     },
     {
       "name": "system.apply.status",
@@ -106,7 +135,18 @@
       "capability": "status:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "prepare_id": "<prepare_id>"
+        },
+        "result_format": "found + status + kvittering (auditdata) for det soegte apply.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Brug ved tabt eller uklart apply-svar foer nogen retry."
+      }
     },
     {
       "name": "system.prepare.status",
@@ -129,7 +169,18 @@
       "capability": "status:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "prepare_id": "<prepare_id>"
+        },
+        "result_format": "Prepare-postens tilstand, udløb og normaliseret aendring.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "pending betyder klar til apply; expired kraefver nyt prepare."
+      }
     },
     {
       "name": "system.audit.search",
@@ -157,7 +208,19 @@
       "capability": "audit:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "operation": "change.apply",
+          "limit": 20
+        },
+        "result_format": "Auditposter (seneste foerst) filtreret paa operation/request_id.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Sammenlign result-feltet med den forventede udfald."
+      }
     },
     {
       "name": "ha.entity.search",
@@ -191,7 +254,22 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "query": "temperatur",
+          "domains": [
+            "sensor"
+          ],
+          "limit": 10
+        },
+        "result_format": "matches med entity_id, score og device-navn, plus count.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "count er antal returnerede; soeg smalere med domains hvis listen er lang."
+      }
     },
     {
       "name": "ha.calendar.events",
@@ -228,7 +306,22 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "entity_ids": [
+            "calendar.hjem"
+          ],
+          "start": "2026-08-22T00:00:00+00:00",
+          "end": "2026-08-23T00:00:00+00:00"
+        },
+        "result_format": "Kalenderbegivenheder i vinduet pr. kalender-entity.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Tider er ISO-8601 med tidszone."
+      }
     },
     {
       "name": "ha.state.get",
@@ -259,7 +352,21 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "entity_ids": [
+            "sensor.stue_temperatur"
+          ],
+          "include_attributes": true
+        },
+        "result_format": "states med state, attributes, friendly_name og tidsstempler.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Laes state/attributes igen efter en mutation for at verificere udfaldet."
+      }
     },
     {
       "name": "ha.history.get",
@@ -307,7 +414,24 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "entity_ids": [
+            "sensor.stue_temperatur"
+          ],
+          "start": "2026-08-22T00:00:00+00:00",
+          "end": "2026-08-23T00:00:00+00:00",
+          "minimal": true,
+          "limit": 100
+        },
+        "result_format": "Tidsserier pr. entity i vaerdiet/vinduet plus available-flag.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "available=false betyder upstream-fejl; se error.code."
+      }
     },
     {
       "name": "ha.statistics.get",
@@ -351,7 +475,23 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "statistic_ids": [
+            "sensor.stue_temperatur"
+          ],
+          "start": "2026-08-22T00:00:00+00:00",
+          "end": "2026-08-23T00:00:00+00:00",
+          "period": "hour"
+        },
+        "result_format": "Statistikker pr. statistic_id for perioden.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "period skal passe til vindojets laengde."
+      }
     },
     {
       "name": "ha.logbook.get",
@@ -393,7 +533,21 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "start": "2026-08-22T00:00:00+00:00",
+          "end": "2026-08-23T00:00:00+00:00",
+          "limit": 100,
+          "offset": 0
+        },
+        "result_format": "entries + count + has_more til sideinddeling.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Foelsk videre med offset saa laenge has_more er sand."
+      }
     },
     {
       "name": "ha.template.render",
@@ -417,7 +571,18 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "template": "{{ states('sensor.stue_temperatur') }}"
+        },
+        "result_format": "Renderet template-output.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Templates koerer read-only; fejl rapporteres som TEMPLATE_ERROR."
+      }
     },
     {
       "name": "ha.services.list",
@@ -443,13 +608,24 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "domain": "light"
+        },
+        "result_format": "Servicedefinitioner (felter/selector) for domaenet.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Brug felterne til at bygge et gyldigt change.prepare.service-kald."
+      }
     },
     {
       "name": "ha.target.resolve",
       "mode": "read",
       "risk": 0,
-      "description": "Resolve entity, device, area, floor eller label",
+      "description": "Loes entity_id(s) mod domaenefiltret; area_id/device_id accepteres men ekspanderes aldrig",
       "arguments": {
         "type": "object",
         "properties": {
@@ -472,7 +648,25 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "target": {
+            "entity_id": [
+              "light.kontor"
+            ]
+          },
+          "allowed_domains": [
+            "light"
+          ]
+        },
+        "result_format": "entity_ids der eksisterer og passer domaenefiltret, plus unresolved-liste.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "unresolved skal vaere tom foer du preparerer en service-aendring."
+      }
     },
     {
       "name": "ha.registry.list",
@@ -510,7 +704,19 @@
       "capability": "registry:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "registry": "area",
+          "limit": 50
+        },
+        "result_format": "registry-items med id/navn (query-filtreret).",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Brug id'erne direkte i ha.registry.get eller change.prepare.registry."
+      }
     },
     {
       "name": "ha.registry.get",
@@ -544,7 +750,19 @@
       "capability": "registry:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "registry": "area",
+          "id": "<area_id>"
+        },
+        "result_format": "Enkelt registry-entry med alle felter.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "404 betyder ukendt id i det valgte registry."
+      }
     },
     {
       "name": "ha.config_entries.list",
@@ -572,7 +790,19 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "domain": "mqtt",
+          "limit": 50
+        },
+        "result_format": "Config entries med entry_id, domain, title og state.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "state=loaded er den sunde tilstand foer reload/options."
+      }
     },
     {
       "name": "ha.config_entries.get",
@@ -595,7 +825,18 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "entry_id": "<entry_id>"
+        },
+        "result_format": "Detaljer for eet config entry inkl. options hvor synligt.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Laes entry igen efter change.apply for at verificere ny tilstand."
+      }
     },
     {
       "name": "ha.automation.traces",
@@ -626,7 +867,19 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "entity_id": "automation.morgenlys",
+          "limit": 25
+        },
+        "result_format": "Trace-runs for automationen (seneste foerst).",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Brug traces efter automationsaendringer for at se faktisk korelse."
+      }
     },
     {
       "name": "ha.dashboard.list",
@@ -642,7 +895,16 @@
       "capability": "lovelace:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {},
+        "result_format": "Dashboards med url_path, id, titel og tilstand.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "url_path fra listen gaar direkte i ha.dashboard.get."
+      }
     },
     {
       "name": "ha.dashboard.get",
@@ -665,7 +927,18 @@
       "capability": "lovelace:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "url_path": "lovelace"
+        },
+        "result_format": "Dashboardets konfiguration (views) og metadata.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "sha256 af svaret er before_sha256 til dashboard-prepare."
+      }
     },
     {
       "name": "ha.logs.get",
@@ -705,7 +978,30 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "source": "core",
+          "lines": 200,
+          "contains": "error"
+        },
+        "result_format": "Loglinjer (redigerede) fra den valgte kilde.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "source=app kraever app_slug; linjerne er allerede hemmeligheds-redigerede.",
+        "valid_combinations": [
+          {
+            "source": "core|supervisor|host",
+            "app_slug": "maa ikke vaere sat"
+          },
+          {
+            "source": "app",
+            "app_slug": "paakraevet gyldigt app-slug"
+          }
+        ]
+      }
     },
     {
       "name": "esphome.config.validate",
@@ -736,7 +1032,19 @@
       "capability": "files:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "root": "config",
+          "path": "esphome/firmware.yaml"
+        },
+        "result_format": "Valideringsprofil, engine og eventuelle limitations.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "ok=false betyder syntaksfejl; ret dem foer build.start."
+      }
     },
     {
       "name": "esphome.build.start",
@@ -765,7 +1073,21 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "device": "node-a",
+          "tail_lines": 40
+        },
+        "result_format": "Jobbeskrivelse (job_id, status, tail af builder-log).",
+        "side_effects": "Starter et kompileringsjob i ESPHome-builder-addon'et (CPU/artefakter).",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "esphome.build.status"
+        ],
+        "verification_hint": "Poll esphome.build.status med job_id indtil succeeded/failed."
+      }
     },
     {
       "name": "esphome.build.status",
@@ -795,7 +1117,19 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "job_id": "<job_id>",
+          "tail_lines": 80
+        },
+        "result_format": "Jobstatus med bounded log-tail.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Brug kun build_job_id fra en succesfuld build i upload.prepare."
+      }
     },
     {
       "name": "esphome.upload.prepare",
@@ -825,7 +1159,21 @@
       "capability": "control:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "device": "node-a",
+          "build_job_id": "<job_id>"
+        },
+        "result_format": "Staged OTA-upload med device, binaries og sha256.",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "Efter apply: laes esphome.device.status for enhedens nye tilstand."
+      }
     },
     {
       "name": "esphome.device.status",
@@ -856,7 +1204,20 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "entity_ids": [
+            "binary_sensor.node_a"
+          ]
+        },
+        "result_format": "Enheds-entities' nuvaerende tilstand.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "online + forventet sensorvaerdier bekraefter vellykket OTA."
+      }
     },
     {
       "name": "esphome.logs.get",
@@ -886,7 +1247,19 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "device": "node-a",
+          "lines": 100
+        },
+        "result_format": "Bounded log-tail for enheden (redigeret).",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Se efter boot-linjer efter OTA for at bekraefte genstart."
+      }
     },
     {
       "name": "ha.supervisor.info",
@@ -915,7 +1288,21 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "sections": [
+            "core",
+            "host"
+          ]
+        },
+        "result_format": "Supervisor-sektioner (core/supervisor/os/host) som listet i sections.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "version-felterne viser hvad en update vil skifte."
+      }
     },
     {
       "name": "ha.apps.list",
@@ -935,7 +1322,18 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "include_config": false
+        },
+        "result_format": "Installeret apps (addons) med version og tilstand.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Brug slug-feltet som target i change.prepare.supervisor resource=app."
+      }
     },
     {
       "name": "ha.backups.list",
@@ -957,7 +1355,18 @@
       "capability": "backup:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "limit": 50
+        },
+        "result_format": "Backups (nyeste foerst) med slug/dato/stoerrelse.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Notér backup-slug foer store Supervisor-aendringer."
+      }
     },
     {
       "name": "ha.updates.list",
@@ -973,7 +1382,16 @@
       "capability": "control:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {},
+        "result_format": "Tilgaengelige og loebende opdateringer.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "update_id her er target for change.prepare.supervisor resource=update."
+      }
     },
     {
       "name": "files.list",
@@ -1014,7 +1432,21 @@
       "capability": "files:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "root": "config",
+          "path": "",
+          "recursive": false,
+          "limit": 100
+        },
+        "result_format": "Filer med stoerrelse og sha256 under den valgte rod.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "sha256 her er expected_sha256 til file/file_patch prepare."
+      }
     },
     {
       "name": "files.read",
@@ -1055,7 +1487,19 @@
       "capability": "files:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "root": "config",
+          "path": "configuration.yaml"
+        },
+        "result_format": "Filindhold (+ valgt linjevindue) med sha256.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Laes altid foer prepare; brug samme sha256 i expected_sha256."
+      }
     },
     {
       "name": "files.search",
@@ -1099,7 +1543,22 @@
       "capability": "files:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "roots": [
+            "config"
+          ],
+          "query": "mqtt:",
+          "glob": "*.yaml"
+        },
+        "result_format": "matches med root, path, linjenummer og redigeret linjetekst.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Soeg smalt med glob; kun foerste match pr. fil returneres."
+      }
     },
     {
       "name": "files.diff",
@@ -1140,13 +1599,27 @@
       "capability": "files:read",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "root": "config",
+          "path": "configuration.yaml",
+          "new_content": "home:\n  name: Hjem\n",
+          "expected_sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+        },
+        "result_format": "Unified diff mellem nuvaerende indhold og new_content (skriver ikke).",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Diff'en er praecis den aendring et foelgende change.prepare.file laver."
+      }
     },
     {
       "name": "change.prepare.service",
       "mode": "prepare",
       "risk": 1,
-      "description": "Forbered typed Home Assistant servicekald",
+      "description": "Forbered typed Home Assistant servicekald til HA-enheder/services; dette er ikke mailtransport, og email skal altid bruge change.prepare.mail_send i stedet for notify",
       "arguments": {
         "type": "object",
         "properties": {
@@ -1197,7 +1670,29 @@
       "capability": "control:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "domain": "light",
+          "service": "turn_on",
+          "target": {
+            "entity_id": [
+              "light.kontor"
+            ]
+          },
+          "data": {
+            "brightness": 128
+          }
+        },
+        "result_format": "Staged servicekald med target, data og forventet effekt.",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "Efter apply: ha.state.get paa target-entity. Brug aldrig domain=notify som fallback til email; email skal gaa via change.prepare.mail_send."
+      }
     },
     {
       "name": "change.prepare.sequence",
@@ -1231,7 +1726,31 @@
       "capability": "control:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "actions": [
+            {
+              "domain": "light",
+              "service": "turn_on",
+              "target": {
+                "entity_id": [
+                  "light.kontor"
+                ]
+              }
+            }
+          ],
+          "stop_on_error": true
+        },
+        "result_format": "Staget sekvens med pr. handlingsplan og stop_on_error-politik.",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "Ved SEQUENCE_ACTION_FAILED ses failed_index og delresultater i details."
+      }
     },
     {
       "name": "change.prepare.file",
@@ -1280,7 +1799,24 @@
       "capability": "files:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "root": "config",
+          "path": "custom_components/example.yaml",
+          "new_content": "home:\n  name: Hjem\n",
+          "expected_sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+          "validation_profile": "yaml"
+        },
+        "result_format": "Staget hel-fil-skrivning med diff og before/after-sha256.",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "Efter apply: files.read med ny sha256."
+      }
     },
     {
       "name": "change.prepare.file_patch",
@@ -1358,7 +1894,30 @@
       "capability": "files:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "root": "config",
+          "path": "configuration.yaml",
+          "expected_sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+          "patches": [
+            {
+              "start_line": 1,
+              "end_line": 2,
+              "old_content": "home:\n  name: Gammel",
+              "new_content": "home:\n  name: Hjem"
+            }
+          ]
+        },
+        "result_format": "Staget patch med pr. patch placering og overlap-tjek.",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "FILE_PATCH_MISMATCH/AMBIGUOUS: laes regionen igen og preparer forfra."
+      }
     },
     {
       "name": "change.prepare.registry",
@@ -1399,7 +1958,24 @@
       "capability": "registry:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "registry": "label",
+          "id": "<id>",
+          "changes": {
+            "name": "Nyt navn"
+          }
+        },
+        "result_format": "Staget registry-aendring med felt-diff og versions-tjek.",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "Efter apply: ha.registry.get paa samme id."
+      }
     },
     {
       "name": "change.prepare.dashboard",
@@ -1430,7 +2006,24 @@
       "capability": "lovelace:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "url_path": "lovelace",
+          "config": {
+            "views": []
+          },
+          "expected_sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+        },
+        "result_format": "Staget dashboard-udskiftning med before/after-sha256.",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "Efter apply: ha.dashboard.get igen; sammenlign sha256."
+      }
     },
     {
       "name": "change.prepare.config_entry",
@@ -1449,8 +2042,6 @@
               "reload",
               "enable",
               "disable",
-              "reauth",
-              "reconfigure",
               "options"
             ]
           },
@@ -1468,7 +2059,31 @@
       "capability": "control:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "entry_id": "<entry_id>",
+          "action": "reload"
+        },
+        "result_format": "Staget config-entry-handling med entry_id og parametre.",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "Efter apply: ha.config_entries.get viser ny state/options.",
+        "valid_combinations": [
+          {
+            "action": "reload|enable|disable",
+            "options": "maa ikke vaere sat"
+          },
+          {
+            "action": "options",
+            "options": "objekt med de nye options"
+          }
+        ]
+      }
     },
     {
       "name": "change.prepare.supervisor",
@@ -1487,7 +2102,16 @@
             ]
           },
           "action": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "install",
+              "update",
+              "backup",
+              "restore",
+              "start",
+              "stop",
+              "restart"
+            ]
           },
           "target": {
             "type": "string"
@@ -1506,7 +2130,39 @@
       "capability": "control:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "resource": "app",
+          "action": "update",
+          "target": "core_mosquitto"
+        },
+        "result_format": "Staget Supervisor-handling med valideret endpoint (bygget af resource/target/action).",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "Efter apply: ha.apps.list / ha.backups.list / ha.updates.list igen.",
+        "valid_combinations": [
+          {
+            "resource": "app",
+            "action": "install|update|backup|restore|start|stop|restart",
+            "target": "paakraevet app-slug (fra ha.apps.list); endpoint /addons/{slug}/{action}"
+          },
+          {
+            "resource": "backup",
+            "action": "samme faste verber som app (install|update|backup|restore|start|stop|restart)",
+            "target": "backup-slug (fra ha.backups.list); udelades det bruges action som id: /backups/{target|action}"
+          },
+          {
+            "resource": "update",
+            "action": "samme faste verber som app (install|update|backup|restore|start|stop|restart)",
+            "target": "update-id (fra ha.updates.list); udelades det bruges action som id: /updates/{target|action}"
+          }
+        ]
+      }
     },
     {
       "name": "change.prepare.core",
@@ -1538,7 +2194,34 @@
       "capability": "control:write",
       "handler": "dispatch_request",
       "external_route": "dispatch",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "action": "check_config"
+        },
+        "result_format": "Staget kernehandling med risici (normal/high/critical).",
+        "side_effects": "Opretter et staged prepare-id (udloeber); aendrer intet i installationen endnu.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "restart/stop kobler HA fra: vent paa genforbindelse, laes system.status bagefter.",
+        "valid_combinations": [
+          {
+            "action": "check_config",
+            "scope": "ignoreres"
+          },
+          {
+            "action": "reload",
+            "scope": "valgfri domaene-streng"
+          },
+          {
+            "action": "restart|stop",
+            "scope": "ignoreres; afbryder forbindelsen"
+          }
+        ]
+      }
     },
     {
       "name": "change.apply",
@@ -1579,7 +2262,23 @@
       "capability": "mutation:apply",
       "handler": "apply_request",
       "external_route": "apply",
-      "permission": "admin"
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "prepare_id": "<prepare_id>",
+          "expected_digest": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+          "confirmed": true,
+          "idempotency_key": "<ny uuid>"
+        },
+        "result_format": "Apply-kvittering med resultat, after-state, verifikation og evt. rollback.",
+        "side_effects": "Udfoerer den tidligere preparerede aendring i installationen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [
+          "system.apply.status"
+        ],
+        "verification_hint": "Samme idempotency_key giver samme kvittering uden dobbeltudfoerelse."
+      }
     }
   ]
 }

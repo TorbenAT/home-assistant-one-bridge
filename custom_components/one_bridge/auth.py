@@ -14,6 +14,7 @@ import logging
 import math
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from aiohttp import web
 
@@ -32,6 +33,7 @@ from .const import (
     API_PREPARE_RATE_MAX,
     API_RATE_WINDOW_SECONDS,
     API_READ_RATE_MAX,
+    DOMAIN,
     TOKEN_RATE_MAX_FAILURES,
     TOKEN_RATE_WINDOW_SECONDS,
 )
@@ -39,6 +41,37 @@ from .models import SuiteBridgeError, enforce_capability_policy
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _local_auth_token_endpoint(hass: HomeAssistant) -> tuple[str, bool]:
+    """Resolve this instance's own /auth/token endpoint for the token proxy.
+
+    The upstream URL always comes from Home Assistant's own configuration
+    (helpers.network), never from request headers such as Host or
+    X-Forwarded-*. Loopback HTTP is trusted by construction; HTTPS keeps
+    certificate verification on unless the operator explicitly opted out via
+    internal_ws_verify_ssl — the same documented escape hatch the WS client
+    uses.
+    """
+    data = hass.data.get(DOMAIN) or {}
+    bridge_config = data.get("config") if isinstance(data, dict) else None
+    verify_ssl = bool(getattr(bridge_config, "internal_ws_verify_ssl", True))
+    try:
+        from homeassistant.helpers import network as ha_network
+
+        base_url = ha_network.get_url(
+            hass,
+            allow_internal=True,
+            allow_external=False,
+            allow_cloud=False,
+            allow_ip=True,
+        )
+    except Exception:  # noqa: BLE001 - NoURLAvailableError and stub environments
+        base_url = "http://127.0.0.1:8123"
+    parsed = urlparse(str(base_url))
+    scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "http"
+    netloc = parsed.netloc or "127.0.0.1:8123"
+    return f"{scheme}://{netloc}/auth/token", verify_ssl
 _PKCE_ALLOWED_CHARACTERS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "abcdefghijklmnopqrstuvwxyz"
@@ -174,6 +207,51 @@ class BridgeAuthorizer:
         )
         return user, refresh_token_id
 
+    def authorize_prebody(self, request: web.Request) -> None:
+        """Identity gate for dispatch endpoints, run before the body is read.
+
+        Performs only body-independent checks (bridge enabled, HA user present,
+        active and allowlisted). Capability policy and rate limiting stay in
+        authorize so unauthenticated traffic cannot cost parse resources while
+        authenticated requests keep their exact per-mode semantics.
+        """
+        config = self.config
+        if not config.enabled:
+            raise SuiteBridgeError(
+                "BRIDGE_NOT_CONFIGURED",
+                config.error or "Bridge v2 er ikke aktiveret.",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        user = request.get(KEY_HASS_USER)
+        refresh_token_id = request.get(KEY_HASS_REFRESH_TOKEN_ID)
+        del refresh_token_id
+        if user is None:
+            raise SuiteBridgeError(
+                "OAUTH_REQUIRED",
+                "Kaldet kræver et Home Assistant OAuth-token.",
+                HTTPStatus.UNAUTHORIZED,
+            )
+        if not user.is_active:
+            raise SuiteBridgeError("USER_INACTIVE", "HA-brugeren er deaktiveret.", 403)
+        if config.allowed_user_ids and user.id not in config.allowed_user_ids:
+            raise SuiteBridgeError(
+                "USER_NOT_ALLOWED",
+                "HA-brugeren er ikke på Bridge-allowlisten.",
+                HTTPStatus.FORBIDDEN,
+            )
+        if config.require_owner and not user.is_owner:
+            raise SuiteBridgeError(
+                "OWNER_REQUIRED",
+                "Bridge-konfigurationen kræver Home Assistant-ejeren.",
+                HTTPStatus.FORBIDDEN,
+            )
+        if config.require_admin and not user.is_admin:
+            raise SuiteBridgeError(
+                "ADMIN_REQUIRED",
+                "Bridge-konfigurationen kræver en administrator.",
+                HTTPStatus.FORBIDDEN,
+            )
+
     def authorize(
         self,
         request: web.Request,
@@ -251,6 +329,11 @@ class BridgeAuthorizer:
         )
 
 
+def _log_safe(value: Any) -> str:
+    """Strip control characters so request data cannot forge log lines."""
+    return "".join(ch for ch in str(value or "") if ch.isprintable())
+
+
 class OAuthClientMetadataView(HomeAssistantView):
     """IndieAuth client-id page used by Home Assistant OAuth."""
 
@@ -305,6 +388,21 @@ class _FailureLimiter:
         self._failures.pop(key, None)
 
 
+def _refresh_token_allowed(config: BridgeConfig, refresh_token: Any) -> bool:
+    """Check that a refresh token belongs to this Bridge's OAuth client and users."""
+    user = refresh_token.user
+    return bool(
+        refresh_token.client_id == config.oauth_client_id
+        and user.is_active
+        and (not config.require_owner or user.is_owner)
+        and (not config.require_admin or user.is_admin)
+        and (
+            not config.allowed_user_ids
+            or user.id in config.allowed_user_ids
+        )
+    )
+
+
 def _extract_client_credentials(request: web.Request, data: dict[str, str]) -> tuple[str, str]:
     client_id = data.get("client_id", "")
     client_secret = data.get("client_secret", "")
@@ -336,18 +434,7 @@ class OAuthTokenProxyView(HomeAssistantView):
         self._limiter = _FailureLimiter()
 
     def _refresh_token_allowed(self, refresh_token: Any) -> bool:
-        user = refresh_token.user
-        config = self._config
-        return bool(
-            refresh_token.client_id == config.oauth_client_id
-            and user.is_active
-            and (not config.require_owner or user.is_owner)
-            and (not config.require_admin or user.is_admin)
-            and (
-                not config.allowed_user_ids
-                or user.id in config.allowed_user_ids
-            )
-        )
+        return _refresh_token_allowed(self._config, refresh_token)
 
     def _reject_native_refresh_token(self, token: str) -> None:
         refresh_token = self._hass.auth.async_get_refresh_token_by_token(token)
@@ -453,12 +540,13 @@ class OAuthTokenProxyView(HomeAssistantView):
             forwarded["refresh_token"] = supplied_refresh_token
 
         session = async_get_clientsession(self._hass)
+        token_url, verify_ssl = _local_auth_token_endpoint(self._hass)
         try:
             async with session.post(
-                "https://homeassistant/auth/token",
+                token_url,
                 data=forwarded,
                 timeout=30,
-                ssl=False,
+                ssl=verify_ssl,
             ) as response:
                 body = await response.read()
                 status = response.status
@@ -469,8 +557,8 @@ class OAuthTokenProxyView(HomeAssistantView):
             _LOGGER.warning(
                 "OAuth token upstream network failure: grant_type=%s redirect_uri=%s "
                 "client_id_match=%s upstream_status=%s upstream_error=%s exception_type=%s",
-                grant_type,
-                data.get("redirect_uri", ""),
+                _log_safe(grant_type),
+                _log_safe(data.get("redirect_uri", "")),
                 client_id == self._config.oauth_client_id,
                 "network_error",
                 "",
@@ -546,11 +634,11 @@ class OAuthTokenProxyView(HomeAssistantView):
             _LOGGER.warning(
                 "OAuth token upstream response: grant_type=%s redirect_uri=%s "
                 "client_id_match=%s upstream_status=%s upstream_error=%s exception_type=%s",
-                grant_type,
-                data.get("redirect_uri", ""),
+                _log_safe(grant_type),
+                _log_safe(data.get("redirect_uri", "")),
                 client_id == self._config.oauth_client_id,
                 status,
-                upstream_error,
+                _log_safe(upstream_error),
                 "",
             )
             if status == HTTPStatus.BAD_REQUEST and upstream_error in {
@@ -590,8 +678,20 @@ class OAuthRevokeProxyView(HomeAssistantView):
     def __init__(self, hass: HomeAssistant, config: BridgeConfig) -> None:
         self._hass = hass
         self._config = config
+        self._limiter = _FailureLimiter()
 
     async def post(self, request: web.Request) -> web.Response:
+        remote = request.remote or "unknown"
+        if self._limiter.blocked(remote):
+            return web.Response(
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+                headers={"Cache-Control": "no-store"},
+            )
+        if not self._config.enabled:
+            return web.Response(
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+                headers={"Cache-Control": "no-store"},
+            )
         post = await request.post()
         data = {str(key): str(value) for key, value in post.items()}
         client_id, client_secret = _extract_client_credentials(request, data)
@@ -600,8 +700,19 @@ class OAuthRevokeProxyView(HomeAssistantView):
             client_id != self._config.oauth_client_id
             or not hmac.compare_digest(supplied_hash, self._config.client_secret_sha256)
         ):
+            self._limiter.failed(remote)
             return web.Response(status=HTTPStatus.UNAUTHORIZED)
         token = data.get("token", "")
+        # Only revoke tokens that belong to this Bridge's OAuth client and
+        # allowed users; never forward arbitrary tokens to Home Assistant.
+        model = (
+            self._hass.auth.async_get_refresh_token_by_token(token)
+            if token
+            else None
+        )
+        if model is None or not _refresh_token_allowed(self._config, model):
+            self._limiter.failed(remote)
+            return web.Response(status=HTTPStatus.UNAUTHORIZED)
         session = async_get_clientsession(self._hass)
         try:
             async with session.post(
@@ -611,5 +722,7 @@ class OAuthRevokeProxyView(HomeAssistantView):
             ) as response:
                 await response.read()
         except Exception:
+            self._limiter.failed(remote)
             return web.Response(status=HTTPStatus.BAD_GATEWAY)
+        self._limiter.succeeded(remote)
         return web.Response(status=HTTPStatus.OK)

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .models import SuiteBridgeError
+from .models import SuiteBridgeError, validate_slug
 from .redaction import redact_text
 from .ws_client import async_ws_command, resolve_internal_ws_transport
 
@@ -21,7 +21,7 @@ def _limit(value: Any, default: int = 100, maximum: int = 250) -> int:
 
 
 async def audit_search(audit: Any, arguments: dict[str, Any]) -> dict[str, Any]:
-    result = audit.summary(_limit(arguments.get("limit"), 20, 100))
+    result = audit.summary(_limit(arguments.get("limit"), 20, 200))
     operation = arguments.get("operation")
     if operation:
         result["entries"] = [item for item in result["entries"] if item.get("operation") == operation]
@@ -58,13 +58,22 @@ async def statistics(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict
 
 async def logbook(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     entity_ids = arguments.get("entity_ids")
+    # The upstream fetch window must cover the offset: slicing an
+    # already-limit-capped list made every page past the first empty.
+    # Contract alignment: ha.logbook.get allows limit up to 500.
+    limit = _limit(arguments.get("limit"), 100, 500)
+    offset = max(0, int(arguments.get("offset", 0) or 0))
+    window = min(offset + limit, 1_000)
     try:
-        result = await async_ws_command(hass, auth_id, {"type": "logbook/entries", "start_time": arguments["start"], "end_time": arguments["end"], "entity_ids": entity_ids, "limit": _limit(arguments.get("limit"), 100, 250)})
+        result = await async_ws_command(hass, auth_id, {"type": "logbook/entries", "start_time": arguments["start"], "end_time": arguments["end"], "entity_ids": entity_ids, "limit": window})
     except SuiteBridgeError as err:
         return {"entries": [], "count": 0, "entity_ids": entity_ids or [], "available": False, "error": {"code": err.code, "message": redact_text(err.message)}}
     entries = list(result or [])
-    limit, offset = _limit(arguments.get("limit"), 100, 250), int(arguments.get("offset", 0) or 0)
-    return {"entries": entries[offset:offset + limit], "count": len(entries[offset:offset + limit]), "entity_ids": entity_ids or [], "available": True, "offset": offset, "limit": limit, "has_more": len(entries) > offset + limit}
+    page = entries[offset:offset + limit]
+    # The upstream fetch is capped at 1000 entries; past that the window
+    # silently ends, so say so instead of implying the world was fully read.
+    window_capped = offset + limit > 1_000
+    return {"entries": page, "count": len(page), "entity_ids": entity_ids or [], "available": True, "offset": offset, "limit": limit, "has_more": len(entries) > offset + limit, "window_capped": window_capped}
 
 
 async def template_render(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -140,7 +149,8 @@ async def target_resolve(hass: Any, auth_id: str, arguments: dict[str, Any]) -> 
     ids.extend(target.get("entity_id", []) if isinstance(target.get("entity_id"), list) else ([target["entity_id"]] if target.get("entity_id") else []))
     if target.get("area_id") or target.get("device_id"):
         # Registry expansion is intentionally conservative; entity_id is always explicit.
-        ids = ids or []
+        # area_id/device_id are accepted but never expanded here.
+        pass
     entities = []
     for entity_id in ids:
         state = hass.states.get(entity_id)
@@ -207,7 +217,8 @@ async def registry_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> d
         if query and query not in str(data).casefold():
             continue
         entries.append(data)
-        if len(entries) >= _limit(arguments.get("limit"), 100, 250):
+        # Contract alignment: ha.registry.list caps limit at 200.
+        if len(entries) >= _limit(arguments.get("limit"), 100, 200):
             break
     return {"registry": arguments["registry"], "items": entries, "count": len(entries)}
 
@@ -228,7 +239,8 @@ async def config_entries_list(hass: Any, auth_id: str, arguments: dict[str, Any]
         if arguments.get("state") and entry.state.value != arguments["state"]:
             continue
         entries.append({"entry_id": entry.entry_id, "domain": entry.domain, "title": entry.title, "state": entry.state.value, "disabled_by": entry.disabled_by.value if entry.disabled_by else None})
-        if len(entries) >= _limit(arguments.get("limit"), 100, 250):
+        # Contract alignment: ha.config_entries.list caps limit at 200.
+        if len(entries) >= _limit(arguments.get("limit"), 100, 200):
             break
     return {"entries": entries, "count": len(entries)}
 
@@ -243,7 +255,7 @@ async def config_entries_get(hass: Any, auth_id: str, arguments: dict[str, Any])
 
 async def automation_traces(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     try:
-        result = await async_ws_command(hass, auth_id, {"type": "trace/list", "domain": "automation", "item_id": arguments["entity_id"].split(".", 1)[-1], "limit": _limit(arguments.get("limit"), 25, 100)})
+        result = await async_ws_command(hass, auth_id, {"type": "trace/list", "domain": "automation", "item_id": arguments["entity_id"].split(".", 1)[-1], "limit": _limit(arguments.get("limit"), 25, 50)})
     except SuiteBridgeError as err:
         return {"traces": [], "available": False, "upstream_error": err.code}
     return {"traces": result or [], "available": True}
@@ -282,9 +294,11 @@ async def logs_get(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[s
     else:
         endpoint = {"supervisor": "/supervisor/logs", "host": "/host/logs"}.get(source)
         if source == "app":
-            slug = str(arguments.get("app_slug") or "").strip()
-            if not slug:
-                raise SuiteBridgeError("APP_SLUG_REQUIRED", "app_slug er obligatorisk for app-logs.", 422)
+            slug = validate_slug(
+                arguments.get("app_slug"),
+                code="APP_SLUG_REQUIRED",
+                message="app_slug er obligatorisk for app-logs og skal være et gyldigt app-slug.",
+            )
             endpoint = f"/addons/{slug}/logs"
         try:
             result = await async_ws_command(hass, auth_id, {"type": "supervisor/api", "endpoint": endpoint, "method": "get"})
@@ -303,7 +317,13 @@ async def supervisor_info(hass: Any, auth_id: str, arguments: dict[str, Any]) ->
         result = await async_ws_command(hass, auth_id, {"type": "supervisor/api", "endpoint": "/supervisor/info", "method": "get"})
     except SuiteBridgeError as err:
         return {"sections": {}, "available": False, "upstream_error": err.code}
-    return {"sections": result if not sections else {key: result.get(key) for key in sections if isinstance(result, dict) and key in result}}
+    # Unwrap the supervisor envelope consistently ({"result","data"} -> data).
+    payload = _supervisor_payload(result)
+    if sections and isinstance(payload, dict):
+        selected = {key: payload[key] for key in sections if key in payload}
+    else:
+        selected = payload if isinstance(payload, dict) else {}
+    return {"sections": selected}
 
 
 async def apps_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -311,7 +331,11 @@ async def apps_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[
         result = await async_ws_command(hass, auth_id, {"type": "supervisor/api", "endpoint": "/store/addons", "method": "get"})
     except SuiteBridgeError as err:
         return {"apps": [], "include_config": bool(arguments.get("include_config")), "available": False, "upstream_error": err.code}
-    return {"apps": result or [], "include_config": bool(arguments.get("include_config"))}
+    payload = _supervisor_payload(result)
+    apps = payload.get("addons") if isinstance(payload, dict) else payload
+    if not isinstance(apps, list):
+        apps = []
+    return {"apps": apps, "include_config": bool(arguments.get("include_config"))}
 
 
 async def backups_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -319,7 +343,11 @@ async def backups_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> di
         result = await async_ws_command(hass, auth_id, {"type": "supervisor/api", "endpoint": "/backups", "method": "get"})
     except SuiteBridgeError as err:
         return {"backups": [], "available": False, "upstream_error": err.code}
-    return {"backups": (result or {}).get("backups", result or [])[:_limit(arguments.get("limit"), 100, 250)] if isinstance(result, dict) else result}
+    payload = _supervisor_payload(result)
+    # Guard: only slice when Supervisor returned a real list — never a dict.
+    backups = payload.get("backups") if isinstance(payload, dict) else None
+    # Contract alignment: ha.backups.list caps limit at 100.
+    return {"backups": backups[:_limit(arguments.get("limit"), 100, 100)] if isinstance(backups, list) else []}
 
 
 async def updates_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -327,7 +355,7 @@ async def updates_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> di
         result = await async_ws_command(hass, auth_id, {"type": "supervisor/api", "endpoint": "/core/info", "method": "get"})
     except SuiteBridgeError as err:
         return {"updates": {}, "available": False, "upstream_error": err.code}
-    return {"updates": result or {}}
+    return {"updates": _supervisor_payload(result)}
 
 
 _ESPHOME_ADDON_SLUG = "5c53de3b_esphome"

@@ -259,6 +259,21 @@ def validate_schema(value: Any, schema: Mapping[str, Any], *, field: str) -> Non
             )
 
 
+def _argument_contract(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive required/optional/enum summary from an operation's JSON schema."""
+    properties = arguments.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    required_raw = arguments.get("required")
+    required = sorted(str(field) for field in required_raw) if isinstance(required_raw, list) else []
+    optional = sorted(set(properties) - set(required))
+    enums = {
+        str(field): list(schema["enum"])
+        for field, schema in sorted(properties.items())
+        if isinstance(schema, dict) and isinstance(schema.get("enum"), list)
+    }
+    return {"required": required, "optional": optional, "enums": enums}
+
+
 class OperationCatalog:
     """Immutable lookup of allowlisted operation contracts."""
 
@@ -337,7 +352,12 @@ class OperationCatalog:
                     }
                 )
             else:
-                result.append(deepcopy(item))
+                entry = deepcopy(item)
+                # Derived (never hand-maintained) argument summary so clients
+                # get required/optional/enums straight from the same schema the
+                # server enforces on every call.
+                entry["argument_contract"] = _argument_contract(item["arguments"])
+                result.append(entry)
         return result
 
     @property

@@ -113,11 +113,32 @@ class HelperManager:
                 403,
             )
         normalized = deepcopy(definition)
-        if require_name and not str(normalized.get("name", "")).strip():
+        name_value = normalized.get("name")
+        if require_name and (not isinstance(name_value, str) or not name_value.strip()):
             raise SuiteBridgeError("HELPER_NAME_REQUIRED", "Helperens name er obligatorisk.")
-        for field in ("name", "icon", "mode", "pattern", "unit_of_measurement", "initial", "duration"):
+        for field in ("name", "icon", "mode", "pattern", "unit_of_measurement"):
             if field in normalized and normalized[field] is not None:
-                normalized[field] = str(normalized[field]).strip()
+                # These fields are string-typed upstream; str() coercion would
+                # silently accept dicts/numbers and forward garbage to HA.
+                if not isinstance(normalized[field], str):
+                    raise SuiteBridgeError(
+                        "INVALID_HELPER_FIELD",
+                        f"Feltet {field} skal være tekst.",
+                    )
+                normalized[field] = normalized[field].strip()
+        for field in ("initial", "duration"):
+            if field in normalized and normalized[field] is not None:
+                value = normalized[field]
+                # Numeric/boolean initials (input_number, counter, timer,
+                # input_boolean) are forwarded untouched; strings are trimmed.
+                if isinstance(value, (bool, int, float)):
+                    continue
+                if not isinstance(value, str):
+                    raise SuiteBridgeError(
+                        "INVALID_HELPER_FIELD",
+                        f"Feltet {field} skal være tekst eller tal.",
+                    )
+                normalized[field] = value.strip()
         if "options" in normalized:
             if not isinstance(normalized["options"], list) or not normalized["options"]:
                 raise SuiteBridgeError("HELPER_OPTIONS_REQUIRED", "options skal være en ikke-tom liste.")
@@ -390,13 +411,9 @@ class HelperManager:
             if str(row.get("id") or row.get(id_key)) == helper_id
         ]
         matched = (not matching) if action == "delete" else bool(matching)
-        if not matched:
-            raise SuiteBridgeError(
-                "HELPER_VERIFY_FAILED",
-                "Helperændringen kunne ikke efterverificeres.",
-                500,
-            )
         after = matching[0] if matching else None
+        # The mutation is already applied at this point; the audit trail must
+        # reflect that before any post-verification outcome is decided.
         audit = await self.audit.append(
             {
                 "operation": item.operation,
@@ -410,6 +427,31 @@ class HelperManager:
                 "result": "executed",
             }
         )
+        if not matched:
+            # Truthful outcome: the change persists but could not be verified.
+            # Never claim a rollback that did not happen.
+            await self.audit.append(
+                {
+                    "operation": item.operation,
+                    "user_id": user_id,
+                    "prepare_id": item.prepare_id,
+                    "domain": domain,
+                    "helper_id": helper_id,
+                    "applied_audit_id": audit["audit_id"],
+                    "result": "verification_failed_after_apply",
+                }
+            )
+            raise SuiteBridgeError(
+                "HELPER_VERIFY_FAILED",
+                "Helperændringen blev udført, men kunne ikke efterverificeres.",
+                500,
+                details={
+                    "applied": True,
+                    "audit_id": audit["audit_id"],
+                    "helper_id": helper_id,
+                    "recovery": "system.apply.status eller manuel inspektion af helperen",
+                },
+            )
         return {
             "executed": True,
             "operation": item.operation,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,13 +19,35 @@ from .models import SuiteBridgeError
 
 INTERNAL_WS_MAX_MSG_SIZE = 512 * 1024
 
+# Per-request WS budget. The dispatch/apply envelope accepts timeout_seconds
+# from the client; the engine binds it here (request-scoped, concurrency-safe
+# via contextvars) instead of silently ignoring the documented field. The hard
+# ceiling keeps a slow upstream from holding bridge workers forever.
+_WS_COMMAND_TIMEOUT: "ContextVar[int]" = ContextVar("one_bridge_ws_command_timeout", default=25)
+_WS_COMMAND_TIMEOUT_CEILING = 185
+
+
+def command_timeout_token(seconds: Any):
+    """Bind this request's WS budget in seconds; reset the token when done."""
+    try:
+        value = int(seconds)
+    except (TypeError, ValueError):
+        value = 25
+    return _WS_COMMAND_TIMEOUT.set(max(1, min(value, _WS_COMMAND_TIMEOUT_CEILING)))
+
+
+def reset_command_timeout(token) -> None:
+    _WS_COMMAND_TIMEOUT.reset(token)
+
 
 def resolve_internal_ws_transport(hass: HomeAssistant) -> tuple[str, bool]:
     """Resolve configured or automatically detected local Home Assistant WS transport."""
     data = hass.data.get(DOMAIN) or {}
     bridge_config = data.get("config") if isinstance(data, dict) else None
     configured_url = str(getattr(bridge_config, "internal_ws_url", "") or "").strip()
-    verify_ssl = bool(getattr(bridge_config, "internal_ws_verify_ssl", False))
+    # Secure by default: certificate verification is required unless the
+    # operator explicitly opted out in the integration configuration.
+    verify_ssl = bool(getattr(bridge_config, "internal_ws_verify_ssl", True))
     if configured_url:
         return configured_url, verify_ssl
 
@@ -61,7 +84,7 @@ async def async_ws_command(
     access_token = hass.auth.async_create_access_token(refresh_token, "127.0.0.1")
     session = async_get_clientsession(hass)
     try:
-        async with asyncio.timeout(25):
+        async with asyncio.timeout(_WS_COMMAND_TIMEOUT.get()):
             ws_url, verify_ssl = resolve_internal_ws_transport(hass)
             async with session.ws_connect(
                 ws_url,

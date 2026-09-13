@@ -125,6 +125,9 @@ def validate_dashboard_config(config: Any) -> list[str]:
         raise SuiteBridgeError("INVALID_DASHBOARD", "Dashboardkonfigurationen skal være et objekt.")
     if "views" in config and not isinstance(config["views"], list):
         raise SuiteBridgeError("INVALID_DASHBOARD", "views skal være en liste.")
+    # Depth first: a pathologically nested document must be rejected by the
+    # bounded scan before json.dumps walks it (dumps itself recurses).
+    _scan_sensitive(config)
     encoded = json.dumps(config, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) > MAX_JSON_BYTES:
         raise SuiteBridgeError(
@@ -132,7 +135,6 @@ def validate_dashboard_config(config: Any) -> list[str]:
             f"Dashboardet må højst fylde {MAX_JSON_BYTES} bytes.",
             413,
         )
-    _scan_sensitive(config)
     warnings: list[str] = []
     flattened = encoded.decode("utf-8", errors="ignore")
     if '"visible"' in flattened or '"users"' in flattened:

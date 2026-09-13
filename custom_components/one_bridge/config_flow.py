@@ -14,10 +14,32 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import network
-from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+)
 
-from .config import BridgeConfig, async_load_config, resolve_allowed_capabilities
-from .const import DEFAULT_PERMISSION_PRESET, DOMAIN, PRIVATE_CONFIG_RELATIVE, ROLE_CAPABILITIES
+from .config import (
+    BridgeConfig,
+    async_load_config,
+    resolve_allowed_capabilities,
+    resolve_raw_permissions,
+    setup_access_token,
+)
+from .const import (
+    DEFAULT_PERMISSION_PRESET,
+    DOMAIN,
+    MAIL_SIGNATURE_PROFILES,
+    OPT_MAIL_SIGNATURE_DEFAULT,
+    OPT_MAIL_SIGNATURE_PHONE,
+    OPT_MAIL_SIGNATURE_SENDER,
+    OPT_MAIL_SIGNATURE_STANDARD,
+    PRIVATE_CONFIG_RELATIVE,
+    ROLE_CAPABILITIES,
+)
 
 
 def _https(value: Any, field: str) -> str:
@@ -127,6 +149,51 @@ def _preset_selector() -> SelectSelector:
     )
 
 
+def _mail_signature_selector() -> TextSelector:
+    return TextSelector(TextSelectorConfig(multiline=True))
+
+
+def _mail_signature_profile_selector() -> SelectSelector:
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=list(MAIL_SIGNATURE_PROFILES),
+            translation_key="mail_signature_profile",
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _mail_signature_options(user_input: dict[str, Any]) -> dict[str, str]:
+    sender = str(user_input.get(OPT_MAIL_SIGNATURE_SENDER, "") or "").strip()
+    standard = str(user_input.get(OPT_MAIL_SIGNATURE_STANDARD, "") or "").strip()
+    phone = str(user_input.get(OPT_MAIL_SIGNATURE_PHONE, "") or "").strip()
+    default_profile = str(
+        user_input.get(OPT_MAIL_SIGNATURE_DEFAULT, "standard") or "standard"
+    ).strip()
+    if sender and (
+        "@" not in sender
+        or any(char.isspace() for char in sender)
+        or len(sender) > 254
+    ):
+        raise ValueError("mail_signature_sender")
+    if len(standard) > 4000 or len(phone) > 4000:
+        raise ValueError("mail_signature_too_long")
+    if default_profile not in MAIL_SIGNATURE_PROFILES:
+        raise ValueError("mail_signature_default_profile")
+    if (standard or phone) and not sender:
+        raise ValueError("mail_signature_sender")
+    if sender and default_profile == "standard" and not standard:
+        raise ValueError("mail_signature_standard")
+    if sender and default_profile == "phone" and not phone:
+        raise ValueError("mail_signature_phone")
+    return {
+        OPT_MAIL_SIGNATURE_SENDER: sender,
+        OPT_MAIL_SIGNATURE_STANDARD: standard,
+        OPT_MAIL_SIGNATURE_PHONE: phone,
+        OPT_MAIL_SIGNATURE_DEFAULT: default_profile,
+    }
+
+
 _ALL_CAPABILITIES = frozenset().union(*ROLE_CAPABILITIES.values())
 _CAPABILITY_OPTION_TO_VALUE = {
     capability.replace(":", "_"): capability for capability in _ALL_CAPABILITIES
@@ -160,22 +227,17 @@ def _capability_selector(role: str) -> SelectSelector:
 
 
 def _raw_capabilities(raw: dict[str, Any]) -> list[str]:
-    role = str(raw.get("role", "target")).strip().lower()
-    if "permission_preset" not in raw and "allowed_capabilities" not in raw:
-        return sorted(ROLE_CAPABILITIES.get(role, frozenset()))
-    _, allowed = resolve_allowed_capabilities(
-        role,
-        raw.get("permission_preset"),
-        raw.get("allowed_capabilities"),
-    )
+    _, allowed = resolve_raw_permissions(raw)
     return sorted(allowed)
 
 
 def _gpt_instructions(raw: dict[str, Any]) -> str:
     base = str(raw.get("public_base_url", "")).rstrip("/")
+    access = setup_access_token(str(raw.get("client_secret_sha256", "")))
+    suffix = f"?token={access}" if access else ""
     role = str(raw.get("role", "target"))
-    preset = str(raw.get("permission_preset", "advanced"))
-    capabilities = _raw_capabilities(raw)
+    preset, allowed = resolve_raw_permissions(raw)
+    capabilities = sorted(allowed)
     writable = "mutation:apply" in capabilities and not bool(raw.get("read_only_lockdown", False))
     lines = [
         "You administer this Home Assistant installation through One Bridge.",
@@ -209,8 +271,8 @@ def _gpt_instructions(raw: dict[str, Any]) -> str:
             "Do not attempt arbitrary shell, generic HTTP/WebSocket proxying or direct .storage writes.",
             "On errors, report request_id, error code, what was rejected and the next concrete action.",
             f"Schema URL: {base}/api/one_bridge/v1/openapi.yaml",
-            f"Instructions URL: {base}/api/one_bridge/v1/instructions.txt",
-            f"Setup URL: {base}/api/one_bridge/v1/setup",
+            f"Instructions URL: {base}/api/one_bridge/v1/instructions.txt{suffix}",
+            f"Setup URL: {base}/api/one_bridge/v1/setup{suffix}",
             f"Privacy Policy URL: {base}/api/one_bridge/v1/privacy",
         ]
     )
@@ -219,8 +281,11 @@ def _gpt_instructions(raw: dict[str, Any]) -> str:
 
 def _setup_placeholders(raw: dict[str, Any], client_secret: str | None) -> dict[str, str]:
     base = str(raw.get("public_base_url", "")).rstrip("/")
+    access = setup_access_token(str(raw.get("client_secret_sha256", "")))
+    suffix = f"?token={access}" if access else ""
     callbacks = raw.get("allowed_redirect_uris") or []
     callback_url = str(callbacks[0]) if callbacks else "Not configured yet — add the callback shown by the GPT editor in One Bridge Options."
+    preset, allowed = resolve_raw_permissions(raw)
     return {
         "client_id": str(raw.get("oauth_client_id", "")),
         "client_secret": client_secret or "Existing secret unchanged; it cannot be read back.",
@@ -229,11 +294,11 @@ def _setup_placeholders(raw: dict[str, Any], client_secret: str | None) -> dict[
         "scope": "homeassistant",
         "callback_url": callback_url,
         "schema_url": f"{base}/api/one_bridge/v1/openapi.yaml",
-        "instructions_url": f"{base}/api/one_bridge/v1/instructions.txt",
-        "setup_url": f"{base}/api/one_bridge/v1/setup",
+        "instructions_url": f"{base}/api/one_bridge/v1/instructions.txt{suffix}",
+        "setup_url": f"{base}/api/one_bridge/v1/setup{suffix}",
         "privacy_url": f"{base}/api/one_bridge/v1/privacy",
-        "permission_preset": str(raw.get("permission_preset", "advanced")),
-        "capabilities": ", ".join(_raw_capabilities(raw)),
+        "permission_preset": preset,
+        "capabilities": ", ".join(sorted(allowed)),
         "gpt_instructions": _gpt_instructions(raw),
     }
 
@@ -266,6 +331,27 @@ class OneBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._pending: dict[str, Any] | None = None
         self._secret: str | None = None
 
+    async def async_step_import(self, import_data=None):
+        if not isinstance(import_data, dict):
+            return self.async_abort(reason="missing_pending_configuration")
+        await self.async_set_unique_id("one_bridge")
+        self._abort_if_unique_id_configured()
+        role = str(import_data.get("role", "source")).strip().lower()
+        installation_id = str(import_data.get("installation_id", "")).strip()
+        public_base_url = str(import_data.get("public_base_url", "")).strip()
+        if role not in {"source", "target"} or not installation_id or not public_base_url:
+            return self.async_abort(reason="invalid_saved_configuration")
+        effective_preset, _ = resolve_raw_permissions(import_data)
+        return self.async_create_entry(
+            title=f"One Bridge ({role})",
+            data={
+                "installation_id": installation_id,
+                "role": role,
+                "public_base_url": public_base_url,
+                "permission_preset": effective_preset,
+            },
+        )
+
     async def async_step_user(self, user_input=None):
         errors = {}
         if user_input is not None:
@@ -290,7 +376,7 @@ class OneBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "persistent_refresh_token": True,
                     "read_only_lockdown": False,
                     "internal_ws_url": "",
-                    "internal_ws_verify_ssl": False,
+                    "internal_ws_verify_ssl": True,
                 }
                 self._secret = secret
                 await self.async_set_unique_id("one_bridge")
@@ -418,10 +504,13 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
         if not raw:
             return self.async_abort(reason="missing_pending_configuration")
         role = str(raw.get("role", "target")).strip().lower()
-        current_preset = str(raw.get("permission_preset", "advanced"))
+        current_preset, _ = resolve_raw_permissions(raw)
+        entry_options = dict(getattr(self.config_entry, "options", {}) or {})
         errors = {}
         if user_input is not None:
             try:
+                signature_options = _mail_signature_options(user_input)
+                self._pending_signature_options = signature_options
                 updated = dict(raw)
                 updated.update(
                     {
@@ -430,7 +519,7 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                         "persistent_refresh_token": bool(user_input.get("persistent_refresh_token", True)),
                         "read_only_lockdown": bool(user_input.get("read_only_lockdown", False)),
                         "internal_ws_url": _internal_ws(user_input.get("internal_ws_url", "")),
-                        "internal_ws_verify_ssl": bool(user_input.get("internal_ws_verify_ssl", False)),
+                        "internal_ws_verify_ssl": bool(user_input.get("internal_ws_verify_ssl", True)),
                     }
                 )
                 callback_value = str(user_input.get("callback_url", "")).strip()
@@ -465,12 +554,12 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                             await self.hass.async_add_executor_job(_write, path, raw)
                             return self.async_abort(reason="invalid_saved_configuration")
                         _apply_runtime_config(self.hass, config)
-                        return self.async_create_entry(
-                            title="",
-                            data={
-                                "callback_url": (updated.get("allowed_redirect_uris") or [""])[0],
-                            },
-                        )
+                        options = dict(entry_options)
+                        options.update(signature_options)
+                        options["callback_url"] = (
+                            updated.get("allowed_redirect_uris") or [""]
+                        )[0]
+                        return self.async_create_entry(title="", data=options)
                 return await self._stage_and_show_setup(raw, updated, rotate_secret)
             except ValueError:
                 errors["base"] = "invalid_options"
@@ -485,7 +574,26 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                 vol.Required("read_only_lockdown", default=bool(raw.get("read_only_lockdown", False))): bool,
                 vol.Required("rotate_client_secret", default=False): bool,
                 vol.Optional("internal_ws_url", default=str(raw.get("internal_ws_url", "") or "")): str,
-                vol.Required("internal_ws_verify_ssl", default=bool(raw.get("internal_ws_verify_ssl", False))): bool,
+                # Secure default: a legacy entry without the key must show the
+                # checkbox CHECKED, so saving options can never silently turn
+                # TLS verification off.
+                vol.Required("internal_ws_verify_ssl", default=bool(raw.get("internal_ws_verify_ssl", True))): bool,
+                vol.Optional(
+                    OPT_MAIL_SIGNATURE_SENDER,
+                    default=str(entry_options.get(OPT_MAIL_SIGNATURE_SENDER, "") or ""),
+                ): str,
+                vol.Optional(
+                    OPT_MAIL_SIGNATURE_STANDARD,
+                    default=str(entry_options.get(OPT_MAIL_SIGNATURE_STANDARD, "") or ""),
+                ): _mail_signature_selector(),
+                vol.Optional(
+                    OPT_MAIL_SIGNATURE_PHONE,
+                    default=str(entry_options.get(OPT_MAIL_SIGNATURE_PHONE, "") or ""),
+                ): _mail_signature_selector(),
+                vol.Required(
+                    OPT_MAIL_SIGNATURE_DEFAULT,
+                    default=str(entry_options.get(OPT_MAIL_SIGNATURE_DEFAULT, "standard") or "standard"),
+                ): _mail_signature_profile_selector(),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
@@ -536,14 +644,16 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                     await self.hass.async_add_executor_job(_write, path, previous)
                     return self.async_abort(reason="invalid_saved_configuration")
                 _apply_runtime_config(self.hass, config)
-                return self.async_create_entry(
-                    title="",
-                    data={
+                options = dict(getattr(self.config_entry, "options", {}) or {})
+                options.update(getattr(self, "_pending_signature_options", {}) or {})
+                options.update(
+                    {
                         "permission_preset": raw.get("permission_preset"),
                         "callback_url": (raw.get("allowed_redirect_uris") or [""])[0],
                         "read_only_lockdown": bool(raw.get("read_only_lockdown", False)),
-                    },
+                    }
                 )
+                return self.async_create_entry(title="", data=options)
             errors["base"] = "setup_not_confirmed"
         return self.async_show_form(
             step_id="setup",

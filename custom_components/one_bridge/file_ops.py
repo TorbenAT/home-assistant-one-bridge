@@ -6,14 +6,33 @@ import hashlib
 import os
 from pathlib import Path
 import stat
+import tempfile
 from typing import Any
 
 from .models import SuiteBridgeError
 from .redaction import redact_text
 
 MAX_FILE_BYTES = 512 * 1024
+_MAX_YAML_ALIAS_USES = 500
 _CONTROL = set(chr(i) for i in range(32)) | {chr(127)}
 VALIDATION_PROFILES = frozenset({"yaml", "home_assistant_yaml", "esphome_yaml"})
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Best-effort directory fsync so a rename survives power loss."""
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+_WRITABLE_ROOTS = frozenset({"config", "addon_configs", "appdaemon", "share"})
 
 
 def _roots(hass: Any) -> dict[str, Path]:
@@ -50,13 +69,18 @@ def resolve_path(hass: Any, root_name: Any, relative: Any, *, write: bool = Fals
     denied = {"secrets.yaml", ".storage", "keys", ".local", "secrets.yml"}
     if any(part in denied or part.startswith(".oauth") for part in candidate.relative_to(root).parts):
         raise SuiteBridgeError("FILE_PATH_DENIED", "Følsomme filer og mapper er ikke tilgængelige.", 403)
-    # Refuse symlink/reparse escapes in every existing component.
+    # Refuse symlink/reparse escapes in every existing component. The symlink
+    # check must not require exists(): a dangling symlink would otherwise pass
+    # here and resolve outside the root once its target is created.
     current = root
     for part in candidate.relative_to(root).parts:
         current = current / part
-        if current.exists() and current.is_symlink():
+        if current.is_symlink():
             raise SuiteBridgeError("FILE_PATH_DENIED", "Symlink-stier er ikke tilladt.", 403)
-    if write and root_name not in {"config", "addon_configs", "appdaemon", "share"}:
+    # Explicit allowlist: a future root added to _roots is read-only until it
+    # is deliberately allowlisted here (the old inline check was tautological
+    # because it compared against exactly the keys of _roots).
+    if write and root_name not in _WRITABLE_ROOTS:
         raise SuiteBridgeError("READ_ONLY_ROOT", "Den valgte root er skrivebeskyttet.", 403)
     return root_name, root, candidate
 
@@ -66,12 +90,23 @@ def _sha(data: bytes) -> str:
 
 
 def _read_bytes(path: Path) -> bytes:
+    # Stat before read: refuse to buffer a giant file into memory only to
+    # discard it afterwards.
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError as err:
+        raise SuiteBridgeError("FILE_NOT_FOUND", "Filen blev ikke fundet.", 404) from err
+    except OSError as err:
+        raise SuiteBridgeError("FILE_READ_FAILED", "Filen kunne ikke læses.", 500) from err
+    if size > MAX_FILE_BYTES:
+        raise SuiteBridgeError("FILE_TOO_LARGE", f"Filen overskrider grænsen på {MAX_FILE_BYTES} bytes.", 413)
     try:
         data = path.read_bytes()
     except FileNotFoundError as err:
         raise SuiteBridgeError("FILE_NOT_FOUND", "Filen blev ikke fundet.", 404) from err
     except OSError as err:
         raise SuiteBridgeError("FILE_READ_FAILED", "Filen kunne ikke læses.", 500) from err
+    # The file may have grown between stat and read (TOCTOU); keep the bound.
     if len(data) > MAX_FILE_BYTES:
         raise SuiteBridgeError("FILE_TOO_LARGE", f"Filen overskrider grænsen på {MAX_FILE_BYTES} bytes.", 413)
     return data
@@ -97,8 +132,23 @@ def _load_yaml_syntax(text: str) -> Any:
     """
     import yaml  # type: ignore
 
+    # Alias expansion bomb ("billion laughs") bound: every alias use counts
+    # against a per-document budget so a small file cannot expand into an
+    # unbounded structure during composition.
     class _SyntaxOnlyLoader(yaml.SafeLoader):
-        pass
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # Per-instance budget: the class object is recreated per call, but
+            # counting on the instance removes any doubt about cross-document
+            # or cross-thread leakage of the alias counter.
+            self.alias_uses = 0
+
+        def compose_node(self, parent, index):
+            if self.check_event(yaml.AliasEvent):
+                self.alias_uses += 1
+                if self.alias_uses > _MAX_YAML_ALIAS_USES:
+                    raise yaml.YAMLError("For mange YAML-aliaser")
+            return super().compose_node(parent, index)
 
     def _unknown_tag(loader: Any, tag_suffix: str, node: Any) -> Any:
         del tag_suffix
@@ -111,7 +161,12 @@ def _load_yaml_syntax(text: str) -> Any:
         raise yaml.YAMLError("Unsupported YAML node")
 
     _SyntaxOnlyLoader.add_multi_constructor("!", _unknown_tag)
-    return yaml.load(text, Loader=_SyntaxOnlyLoader)
+    try:
+        return yaml.load(text, Loader=_SyntaxOnlyLoader)
+    except RecursionError as err:
+        raise SuiteBridgeError(
+            "INVALID_YAML", "YAML-strukturen er for dybt indlejret.", 422
+        ) from err
 
 
 def _validate_automation_structure(document: Any, path: Path) -> None:
@@ -202,7 +257,8 @@ def read_file(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
 def list_files(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     root_name, root, base = resolve_path(hass, arguments.get("root"), arguments.get("path") or "", allow_empty=True)
     recursive = bool(arguments.get("recursive", False))
-    limit = min(int(arguments.get("limit", 100)), 500)
+    # Contract alignment: files.list allows limit up to 1000.
+    limit = min(max(int(arguments.get("limit", 100)), 1), 1000)
     paths = base.rglob("*") if recursive else base.glob("*")
     items = []
     for candidate in sorted(paths):
@@ -225,7 +281,8 @@ def search_files(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(query, str) or not query:
         raise SuiteBridgeError("MISSING_OPERATION_ARGUMENT", "query er obligatorisk.", 422)
     glob = arguments.get("glob") or "*"
-    limit = min(int(arguments.get("limit", 50)), 200)
+    # Contract alignment: files.search allows limit up to 1000.
+    limit = min(max(int(arguments.get("limit", 50)), 1), 1000)
     matches: list[dict[str, Any]] = []
     for root_name in roots:
         _, root, base = resolve_path(hass, root_name, "", allow_empty=True)
@@ -379,13 +436,17 @@ def prepare_file_patch(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         checked.append((start, end, new_content, meta))
 
     previous_end = 0
-    for start, end, _, _ in sorted(checked):
+    # Explicit keys: a plain tuple sort would compare the payload dict on
+    # equal (start, end) and raise TypeError instead of the overlap error.
+    for start, end, _, _ in sorted(checked, key=lambda entry: (entry[0], entry[1])):
         if start <= previous_end:
             raise SuiteBridgeError("OVERLAPPING_FILE_PATCHES", "Patch-linjeområder må ikke overlappe.", 400)
         previous_end = end
 
     after_lines = list(lines)
-    for start, end, new_content, _ in sorted(checked, reverse=True):
+    for start, end, new_content, _ in sorted(
+        checked, key=lambda entry: (entry[0], entry[1]), reverse=True
+    ):
         after_lines[start - 1:end] = new_content.splitlines(keepends=True)
     new_content = "".join(after_lines)
     after = new_content.encode("utf-8")
@@ -424,21 +485,35 @@ def validate_file(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def apply_file(hass: Any, item: Any, backups: Any) -> dict[str, Any]:
+def apply_file(hass: Any, item: Any) -> dict[str, Any]:
+    # Note: the historical `backups` parameter was never used (rollback is the
+    # prepare/apply digest pair below); removed so the signature cannot imply
+    # protection that does not exist.
     material = item.material
     _, root, path = resolve_path(hass, material["root"], material["path"], write=True)
     current = _read_bytes(path)
     if _sha(current) != material["before_sha256"]:
         raise SuiteBridgeError("STALE_FILE_HASH", "Filen ændrede sig efter prepare.", 409)
-    temp = path.with_name(path.name + ".gpt-bridge.tmp")
+    # Unpredictable O_EXCL temp name in the same directory: a fixed temp name
+    # could be collided with by a concurrent apply or written through a
+    # planted symlink at that exact path.
+    fd, temp_name = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".", suffix=".tmp")
+    temp = Path(temp_name)
     try:
-        temp.write_bytes(material["new_content"].encode("utf-8"))
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(material["new_content"].encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
         os.chmod(temp, stat.S_IMODE(path.stat().st_mode))
         os.replace(temp, path)
+        _fsync_directory(path.parent)
         final = _read_bytes(path)
         if _sha(final) != material["after_sha256"]:
             raise SuiteBridgeError("POST_WRITE_HASH_MISMATCH", "Efter-hash matcher ikke prepare-resultatet.", 500)
-    finally:
-        if temp.exists():
-            temp.unlink(missing_ok=True)
+    except BaseException:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return {"root": material["root"], "path": material["path"], "sha256": _sha(final)}

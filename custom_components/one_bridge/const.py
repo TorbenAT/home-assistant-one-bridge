@@ -5,7 +5,7 @@ from __future__ import annotations
 DOMAIN = "one_bridge"
 API_VERSION = 1
 PROTOCOL_VERSION = 2
-BOOTSTRAP_VERSION = "0.9.3"
+BOOTSTRAP_VERSION = "0.9.9"
 CATALOG_VERSION = 2
 
 PRIVATE_CONFIG_RELATIVE = "one-bridge/private/bridge-v1.json"
@@ -13,6 +13,12 @@ BACKUP_RELATIVE = "one_bridge_backups"
 AUDIT_STORE_KEY = "one_bridge.audit"
 AUDIT_STORE_VERSION = 1
 AUDIT_MAX_ENTRIES = 1000
+
+OPT_MAIL_SIGNATURE_SENDER = "mail_signature_sender"
+OPT_MAIL_SIGNATURE_STANDARD = "mail_signature_standard"
+OPT_MAIL_SIGNATURE_PHONE = "mail_signature_phone"
+OPT_MAIL_SIGNATURE_DEFAULT = "mail_signature_default_profile"
+MAIL_SIGNATURE_PROFILES = ("standard", "phone", "none")
 
 PREPARE_TTL_SECONDS = 300
 MAX_REQUEST_BYTES = 1_000_000
@@ -70,6 +76,8 @@ COMMON_CAPABILITIES = {
     "backup:read",
     "backup:write",
     "deployment:read",
+    "mail:read",
+    "mail:write",
     "mutation:apply",
 }
 
@@ -101,6 +109,8 @@ CAPABILITY_LABELS = {
     "backup:read": "Backups - read",
     "backup:write": "Backups - prepare changes",
     "deployment:read": "Supervisor, updates and deployment - read",
+    "mail:read": "Mail - read configured IMAP accounts",
+    "mail:write": "Mail - prepare SMTP sends and save Sent copies",
     "deployment:target": "Target deployment preparation",
     "mutation:apply": "Apply confirmed prepared changes",
 }

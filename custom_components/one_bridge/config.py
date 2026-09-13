@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import hmac
 import ipaddress
 import json
 from pathlib import Path
@@ -61,10 +63,34 @@ def _disabled(error: str) -> BridgeConfig:
         persistent_refresh_token=True,
         read_only_lockdown=True,
         internal_ws_url="",
-        internal_ws_verify_ssl=False,
+        internal_ws_verify_ssl=True,
         config_sha256=digest_json({"error": error}),
         error=error,
     )
+
+
+def setup_access_token(client_secret_sha256: str) -> str:
+    """Derive the setup/instructions access token from the client secret hash.
+
+    The token gates the unauthenticated setup page and instructions endpoint.
+    It is a keyed hash of the stored secret hash, so it is stable across
+    restarts, rotates whenever the client secret rotates, and reveals nothing
+    about the secret itself. An empty or missing secret hash yields a token
+    that can never match a request (the endpoints stay effectively closed).
+    """
+    material = str(client_secret_sha256 or "").strip().encode("utf-8")
+    if not material:
+        return ""
+    return hmac.new(material, b"one-bridge/setup-access-v1", hashlib.sha256).hexdigest()[:32]
+
+
+def setup_access_authorized(supplied: Any, client_secret_sha256: str) -> bool:
+    """Constant-time check of a supplied setup token against the derived one."""
+    expected = setup_access_token(client_secret_sha256)
+    supplied_text = str(supplied or "")
+    if not expected or not supplied_text:
+        return False
+    return hmac.compare_digest(supplied_text, expected)
 
 
 def _https_url(value: Any, field: str) -> str:
@@ -131,6 +157,28 @@ def resolve_allowed_capabilities(
     return normalized_preset, frozenset(allowed & role_capabilities)
 
 
+def resolve_raw_permissions(raw: dict[str, Any]) -> tuple[str, frozenset[str]]:
+    """Resolve the effective permission preset/capabilities from stored raw config.
+
+    Legacy 2.2.x source configs intentionally migrate to Advanced/full source
+    capabilities. All UI/setup/runtime callers must use this same rule so an
+    options preview can never silently downgrade a legacy source install to
+    the default home_control preset.
+    """
+    role = str(raw.get("role", "target")).strip().lower()
+    if role not in ROLE_CAPABILITIES:
+        raise ValueError("role skal være target.")
+    if "permission_preset" not in raw and "allowed_capabilities" not in raw:
+        if role == "source":
+            return "advanced", frozenset(ROLE_CAPABILITIES[role])
+        return resolve_allowed_capabilities(role, DEFAULT_PERMISSION_PRESET, None)
+    return resolve_allowed_capabilities(
+        role,
+        raw.get("permission_preset"),
+        raw.get("allowed_capabilities"),
+    )
+
+
 def _internal_ws_url(value: Any) -> str:
     text = str(value or "").strip().rstrip("/")
     if not text:
@@ -160,14 +208,7 @@ def _load_file(path: Path) -> BridgeConfig:
         role = str(raw.get("role", "")).strip().lower()
         if role not in ROLE_CAPABILITIES:
             raise ValueError("role skal være target.")
-        if "permission_preset" not in raw and "allowed_capabilities" not in raw:
-            permission_preset, allowed_capabilities = "advanced", frozenset(ROLE_CAPABILITIES[role])
-        else:
-            permission_preset, allowed_capabilities = resolve_allowed_capabilities(
-                role,
-                raw.get("permission_preset"),
-                raw.get("allowed_capabilities"),
-            )
+        permission_preset, allowed_capabilities = resolve_raw_permissions(raw)
         base_url = _public_base_url(raw.get("public_base_url"))
         expected_client = f"{base_url}/api/one_bridge/v1/oauth/client"
         client_id = _https_url(raw.get("oauth_client_id", expected_client), "oauth_client_id")
@@ -219,7 +260,9 @@ def _load_file(path: Path) -> BridgeConfig:
             "persistent_refresh_token": bool(raw.get("persistent_refresh_token", True)),
             "read_only_lockdown": bool(raw.get("read_only_lockdown", False)),
             "internal_ws_url": _internal_ws_url(raw.get("internal_ws_url", "")),
-            "internal_ws_verify_ssl": bool(raw.get("internal_ws_verify_ssl", False)),
+            # TLS verification for internal wss:// transport is on by default;
+            # an explicit false in the config file is still honored.
+            "internal_ws_verify_ssl": bool(raw.get("internal_ws_verify_ssl", True)),
         }
         return BridgeConfig(
             enabled=normalized["enabled"],

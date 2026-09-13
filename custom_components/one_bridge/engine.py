@@ -52,10 +52,16 @@ from .dispatch import (
 )
 from .helpers import HelperManager
 from .lovelace import LovelaceManager
-from .models import SuiteBridgeError, enforce_capability_policy
+from .models import (
+    BLOCKED_SERVICE_DOMAINS,
+    SuiteBridgeError,
+    enforce_capability_policy,
+    sequence_action_call,
+    supervisor_endpoint,
+)
+from .idempotency import IdempotencyStore
 from .models import digest_json, json_safe
 from .prepared import PreparedMutationStore
-from .idempotency import IdempotencyStore
 from .registry import RegistryManager
 
 DISPATCH_OPERATION_HANDLERS = frozenset(
@@ -110,6 +116,42 @@ DISPATCH_OPERATION_HANDLERS = frozenset(
 )
 APPLY_OPERATION_HANDLERS = frozenset({"change.apply"})
 IMPLEMENTED_OPERATIONS = DISPATCH_OPERATION_HANDLERS | APPLY_OPERATION_HANDLERS
+
+# Explicit mutation outcome states. A failure's outcome decides whether the
+# idempotency record is dropped (retry-safe) or kept (a retry must replay the
+# recorded result instead of re-executing an already-applied mutation).
+OUTCOME_NOT_APPLIED = "not_applied"
+OUTCOME_APPLIED_VERIFIED = "applied_verified"
+OUTCOME_APPLIED_UNVERIFIED = "applied_unverified"
+OUTCOME_PARTIALLY_APPLIED = "partially_applied"
+OUTCOME_UNKNOWN = "unknown"
+
+
+def _failure_outcome(err: BaseException) -> str:
+    """Classify a failed mutation as not_applied / partially / unverified / unknown."""
+    if isinstance(err, SuiteBridgeError):
+        details = err.details if isinstance(err.details, dict) else {}
+        marked = str(details.get("outcome") or "").strip()
+        if marked:
+            # Only handlers mark outcomes after the point of no return.
+            return marked
+        # Contract errors without a marker are raised at the send boundary or
+        # before it (prepare lookup, digest mismatch, pre-state checks), so
+        # nothing executed and the same idempotency_key may safely retry.
+        return OUTCOME_NOT_APPLIED
+    # An unexpected non-contract failure leaves whether anything executed
+    # unknowable; conservatively keep the idempotency record.
+    return OUTCOME_UNKNOWN
+
+
+def _success_outcome(result: dict[str, Any], operation: str) -> str:
+    if operation == "sequence.call" and result.get("executed") is True:
+        # Every action was acked by a blocking service call.
+        return OUTCOME_APPLIED_VERIFIED
+    if result.get("verified") is True:
+        return OUTCOME_APPLIED_VERIFIED
+    # Sent and acked without (or with pending) independent verification.
+    return OUTCOME_APPLIED_UNVERIFIED
 
 
 class SuiteBridgeEngine:
@@ -273,20 +315,28 @@ class SuiteBridgeEngine:
         self, payload: dict[str, Any], auth: BridgeAuthContext
     ) -> dict[str, Any]:
         """Dispatch with request-scoped audit context for all prepares."""
+        from .ws_client import command_timeout_token, reset_command_timeout
+
         envelope = validate_dispatch_envelope(payload)
-        if envelope["mode"] != "prepare":
-            return await self._dispatch_request(payload, auth)
-        contract = self.catalog.resolve(
-            envelope["operation"], envelope["mode"], envelope["arguments"]
-        )
-        with self.audit.context(
-            auth.audit_metadata(
-                capability=str(contract.get("capability")),
-                operation=envelope["operation"],
-                request_id=envelope.get("request_id"),
+        # Honor the documented timeout_seconds hint instead of ignoring it;
+        # ws_client clamps to its hard ceiling.
+        timeout_token = command_timeout_token(envelope.get("timeout_seconds") or 30)
+        try:
+            if envelope["mode"] != "prepare":
+                return await self._dispatch_request(payload, auth)
+            contract = self.catalog.resolve(
+                envelope["operation"], envelope["mode"], envelope["arguments"]
             )
-        ):
-            return await self._dispatch_request(payload, auth)
+            with self.audit.context(
+                auth.audit_metadata(
+                    capability=str(contract.get("capability")),
+                    operation=envelope["operation"],
+                    request_id=envelope.get("request_id"),
+                )
+            ):
+                return await self._dispatch_request(payload, auth)
+        finally:
+            reset_command_timeout(timeout_token)
 
     def audit_context_for_direct_mutation(
         self,
@@ -595,7 +645,7 @@ class SuiteBridgeEngine:
 
     async def _prepare_service(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
         domain, service = str(arguments["domain"]).strip(), str(arguments["service"]).strip()
-        if domain in {"shell_command", "python_script", "rest_command", "notify"}:
+        if domain in BLOCKED_SERVICE_DOMAINS:
             raise SuiteBridgeError("SERVICE_DENIED", "Denne service-type er ikke tilladt via Bridge.", 403)
         if not self.hass.services.has_service(domain, service):
             raise SuiteBridgeError("SERVICE_NOT_FOUND", "Servicen findes ikke.", 404)
@@ -616,7 +666,22 @@ class SuiteBridgeEngine:
         actions = arguments["actions"]
         if not isinstance(actions, list) or not actions or len(actions) > 25 or not all(isinstance(a, dict) for a in actions):
             raise SuiteBridgeError("INVALID_SEQUENCE", "actions skal være 1-25 objekter.", 400)
-        material = {"actions": json_safe(actions), "stop_on_error": bool(arguments.get("stop_on_error", True)), "verify_each": bool(arguments.get("verify_each", False))}
+        # Enforce the same service-domain deny-list and service existence as a
+        # single service.call for every action before anything is prepared.
+        for action in actions:
+            domain, service = sequence_action_call(action)
+            if not self.hass.services.has_service(domain, service):
+                raise SuiteBridgeError("SERVICE_NOT_FOUND", "Servicen findes ikke.", 404)
+        if bool(arguments.get("verify_each", False)):
+            # Honor-or-reject: there is no per-action observable to verify an
+            # arbitrary service call against, so an explicit request is
+            # refused instead of being captured and silently ignored by apply.
+            raise SuiteBridgeError(
+                "SEQUENCE_VERIFY_UNSUPPORTED",
+                "verify_each understøttes ikke for generiske services; udelad flaget eller del sekvensen op.",
+                422,
+            )
+        material = {"actions": json_safe(actions), "stop_on_error": bool(arguments.get("stop_on_error", True)), "verify_each": False}
         item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="sequence.call", normalized_change=material, material=material, risk="high")
         return self._prepared_response(item)
 
@@ -649,8 +714,9 @@ class SuiteBridgeEngine:
         return self._prepared_response(item)
 
     async def _prepare_supervisor(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
-        if arguments["action"] not in {"install", "update", "backup", "restore", "start", "stop", "restart"}:
-            raise SuiteBridgeError("SUPERVISOR_ACTION_DENIED", "Ukendt Supervisor-handling.", 403)
+        # The authoritative resource/action matrix lives in models.py;
+        # supervisor_endpoint enforces it for prepare and apply alike.
+        supervisor_endpoint(arguments.get("resource"), arguments.get("target"), arguments["action"])
         material = json_safe(arguments)
         item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="supervisor.action", normalized_change=material, material=material, risk="critical")
         return self._prepared_response(item)
@@ -666,18 +732,24 @@ class SuiteBridgeEngine:
         self, payload: dict[str, Any], auth: BridgeAuthContext
     ) -> dict[str, Any]:
         """Apply with request-scoped audit context for all mutations."""
+        from .ws_client import command_timeout_token, reset_command_timeout
+
         envelope = validate_apply_envelope(payload)
-        contract = self.catalog.resolve(
-            envelope["operation"], "apply", envelope["arguments"]
-        )
-        with self.audit.context(
-            auth.audit_metadata(
-                capability=str(contract.get("capability")),
-                operation=envelope["operation"],
-                request_id=envelope.get("request_id"),
+        timeout_token = command_timeout_token(envelope.get("timeout_seconds") or 60)
+        try:
+            contract = self.catalog.resolve(
+                envelope["operation"], "apply", envelope["arguments"]
             )
-        ):
-            return await self._apply_request(payload, auth)
+            with self.audit.context(
+                auth.audit_metadata(
+                    capability=str(contract.get("capability")),
+                    operation=envelope["operation"],
+                    request_id=envelope.get("request_id"),
+                )
+            ):
+                return await self._apply_request(payload, auth)
+        finally:
+            reset_command_timeout(timeout_token)
 
     async def _apply_request(
         self, payload: dict[str, Any], auth: BridgeAuthContext
@@ -729,13 +801,35 @@ class SuiteBridgeEngine:
                         auth,
                     )
                 except Exception as err:
-                    await self.change_idempotency.abort(key, fingerprint)
+                    outcome = _failure_outcome(err)
+                    if outcome == OUTCOME_NOT_APPLIED:
+                        # Nothing executed: drop the record so the same
+                        # idempotency_key can safely retry the mutation.
+                        await self.change_idempotency.abort(key, fingerprint)
+                        audit_result = "failed_not_applied"
+                    else:
+                        # The point of no return is behind us (or unknowable).
+                        # Keep the record so a retry with this key replays the
+                        # recorded outcome instead of re-executing the mutation.
+                        stored: dict[str, Any] = {
+                            "outcome": outcome,
+                            "error": {"type": type(err).__name__, "message": str(err)},
+                            "operation": operation,
+                            "prepare_id": arguments["prepare_id"],
+                        }
+                        if isinstance(err, SuiteBridgeError) and isinstance(err.details, dict):
+                            for detail_key in ("verification", "results", "failed_index", "remaining"):
+                                if detail_key in err.details:
+                                    stored[detail_key] = json_safe(err.details[detail_key])
+                        await self.change_idempotency.finish(key, fingerprint, stored)
+                        audit_result = f"failed_{outcome}"
                     await self.audit.append(
                         {
                             **audit_metadata,
                             "idempotency_key": key,
                             "prepare_id": arguments["prepare_id"],
-                            "result": "failed_or_unknown_outcome",
+                            "result": audit_result,
+                            "outcome": outcome,
                             "error": type(err).__name__,
                             "message": str(err),
                         }
@@ -917,7 +1011,7 @@ class SuiteBridgeEngine:
                     source_sha256=item.material["before_sha256"],
                 )
                 try:
-                    result = await self.hass.async_add_executor_job(apply_file, self.hass, item, self.backups)
+                    result = await self.hass.async_add_executor_job(apply_file, self.hass, item)
                 except Exception:
                     rollback_tmp = before_path.with_name(before_path.name + ".gpt-bridge-rollback.tmp")
                     rollback_tmp.write_bytes(before_bytes)
@@ -980,19 +1074,61 @@ class SuiteBridgeEngine:
                     failed = [entry["entity_id"] for entry in states if entry["state"] is None or entry["state"] in rejected]
                     result["verification"] = {"verified": not failed, "states": states, "failed_entities": failed}
                     if failed:
-                        raise SuiteBridgeError("POST_APPLY_VERIFICATION_FAILED", "Servicen blev kørt, men de forventede entities bestod ikke efterverifikation.", 409, details=result["verification"])
+                        # The blocking call already returned: the mutation was
+                        # SENT successfully and only the post-check failed.
+                        # The outcome marker keeps the idempotency record so a
+                        # retry replays this result instead of re-executing.
+                        raise SuiteBridgeError(
+                            "POST_APPLY_VERIFICATION_FAILED",
+                            "Servicen blev kørt, men de forventede entities bestod ikke efterverifikation.",
+                            409,
+                            details={"outcome": "applied_unverified", **result["verification"]},
+                        )
+                    result["verified"] = True
             elif item.operation == "sequence.call":
                 results = []
-                for action in item.material["actions"]:
-                    domain = action.get("domain")
-                    service = action.get("service")
-                    if not service and isinstance(action.get("action"), str) and "." in action["action"]:
-                        domain, service = action["action"].split(".", 1)
-                    if not domain or not service:
-                        raise SuiteBridgeError("INVALID_SEQUENCE_ACTION", "Sekvens-handlingen mangler domain/service.", 400)
-                    await self.hass.services.async_call(domain, service, service_data=action.get("data") or {}, target=action.get("target") or {}, blocking=True)
+                # stop_on_error defaults True; verify_each is accepted by the
+                # contract but has no per-action observable to verify against,
+                # so it is rejected at prepare time rather than ignored here.
+                stop_on_error = bool(item.material.get("stop_on_error", True))
+                for index, action in enumerate(item.material["actions"], 1):
+                    # Re-run the shared parser so the blocked-domain deny-list
+                    # also guards prepared items created by older versions.
+                    domain, service = sequence_action_call(action)
+                    try:
+                        await self.hass.services.async_call(domain, service, service_data=action.get("data") or {}, target=action.get("target") or {}, blocking=True)
+                    except Exception as err:
+                        if isinstance(err, SuiteBridgeError):
+                            raise
+                        entry = {"domain": domain, "service": service, "ok": False, "error": type(err).__name__}
+                        results.append(entry)
+                        if stop_on_error:
+                            result = {
+                                "executed": False,
+                                "results": results,
+                                "failed_index": index,
+                                "remaining": len(item.material["actions"]) - index,
+                            }
+                            break
+                        continue
                     results.append({"domain": domain, "service": service, "ok": True})
-                result = {"executed": True, "results": results}
+                else:
+                    result = {"executed": True, "results": results}
+                if not result.get("executed"):
+                    # Earlier actions already ran (blocking acks): the sequence
+                    # is partially applied. The outcome marker preserves the
+                    # per-step results so retries never replay completed steps.
+                    raise SuiteBridgeError(
+                        "SEQUENCE_ACTION_FAILED",
+                        f"Sekvenshandling {result.get('failed_index')} fejlede; de resterende handlinger blev ikke kørt.",
+                        409,
+                        details={
+                            "outcome": "partially_applied",
+                            "results": json_safe(result.get("results", [])),
+                            "failed_index": result.get("failed_index"),
+                            "remaining": result.get("remaining"),
+                        },
+                    )
             elif item.operation == "dashboard.replace":
                 dashboard, _ = self.lovelace._dashboard(item.material.get("url_path"))
                 current = await dashboard.async_load(False)
@@ -1039,14 +1175,11 @@ class SuiteBridgeEngine:
                 )
             elif item.operation == "supervisor.action":
                 from .ws_client import async_ws_command
-                resource, action = item.material["resource"], item.material["action"]
-                if resource == "app":
-                    target = item.material.get("target")
-                    if not target:
-                        raise SuiteBridgeError("SUPERVISOR_TARGET_REQUIRED", "App-handlinger kræver target.", 400)
-                    endpoint = f"/addons/{target}/{action}"
-                else:
-                    endpoint = f"/{resource}s/{item.material.get('target') or action}"
+                endpoint = supervisor_endpoint(
+                    item.material.get("resource"),
+                    item.material.get("target"),
+                    item.material["action"],
+                )
                 result = await async_ws_command(self.hass, auth.refresh_token_id, {"type": "supervisor/api", "endpoint": endpoint, "method": "post", "data": item.material.get("options") or {}})
             else:
                 raise SuiteBridgeError(
@@ -1061,11 +1194,12 @@ class SuiteBridgeEngine:
                     "operation": item.operation,
                     "user_id": auth.user_id,
                     "prepare_id": prepare_id,
-                    "result": "failed_or_unknown_outcome",
+                    "result": f"failed_{_failure_outcome(err)}",
                     "error": type(err).__name__,
                     "message": str(err),
                 }
             )
             raise
         await self.prepared.finish(prepare_id, consume=True)
+        result["outcome"] = _success_outcome(result, item.operation)
         return result

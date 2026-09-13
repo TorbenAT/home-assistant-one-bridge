@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -32,11 +33,37 @@ class BackupManager:
         directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         path = directory / f"{stamp}-{self._safe(name)}.json"
-        temp = path.with_suffix(".tmp")
         data = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        temp.write_text(data, encoding="utf-8")
-        os.chmod(temp, 0o600)
-        os.replace(temp, path)
+        # Unpredictable O_EXCL temp name plus fsync before the atomic rename:
+        # a fixed temp name could interleave between concurrent writers and
+        # rename a torn envelope into place as a valid backup.
+        fd, temp_name = tempfile.mkstemp(dir=str(directory), prefix=".backup-", suffix=".tmp")
+        temp = Path(temp_name)
+        try:
+            # fchmod is Unix-only; keep the restrictive mode portable.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            else:
+                os.chmod(temp, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+            try:
+                dir_fd = os.open(str(directory), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        except BaseException:
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
+            raise
         return path
 
     async def create(
@@ -77,7 +104,11 @@ class BackupManager:
         for path in sorted(directory.rglob("*.json"), reverse=True)[:MAX_BACKUPS]:
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                size = path.stat().st_size
+            except OSError:
+                # A backup deleted concurrently must not abort the listing.
+                continue
+            except json.JSONDecodeError:
                 continue
             results.append(
                 {
@@ -88,7 +119,7 @@ class BackupManager:
                     "operation": raw.get("operation"),
                     "source_sha256": raw.get("source_sha256"),
                     "data_sha256": raw.get("data_sha256"),
-                    "size": path.stat().st_size,
+                    "size": size,
                 }
             )
         return results

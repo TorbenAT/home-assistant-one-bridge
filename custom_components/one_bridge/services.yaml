@@ -1,0 +1,16 @@
+mail_send_prepared:
+  name: Send prepared mail
+  description: Internal One Bridge service that executes only an active server-prepared mail mutation.
+  fields:
+    prepare_id:
+      name: Prepare ID
+      description: Server-generated identifier for the active prepared mutation.
+      required: true
+      selector:
+        text:
+    mime_sha256:
+      name: MIME SHA-256
+      description: SHA-256 fingerprint of the exact prepared MIME message.
+      required: true
+      selector:
+        text:
