@@ -535,31 +535,9 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                 normalized, allowed = resolve_allowed_capabilities(role, preset)
                 updated["permission_preset"] = normalized
                 updated["allowed_capabilities"] = sorted(allowed)
-                if not rotate_secret:
-                    previous_without_callback = {
-                        key: value
-                        for key, value in raw.items()
-                        if key != "allowed_redirect_uris"
-                    }
-                    updated_without_callback = {
-                        key: value
-                        for key, value in updated.items()
-                        if key != "allowed_redirect_uris"
-                    }
-                    if previous_without_callback == updated_without_callback:
-                        path = Path(self.hass.config.path(PRIVATE_CONFIG_RELATIVE))
-                        await self.hass.async_add_executor_job(_write, path, updated)
-                        config = await async_load_config(self.hass)
-                        if not config.enabled:
-                            await self.hass.async_add_executor_job(_write, path, raw)
-                            return self.async_abort(reason="invalid_saved_configuration")
-                        _apply_runtime_config(self.hass, config)
-                        options = dict(entry_options)
-                        options.update(signature_options)
-                        options["callback_url"] = (
-                            updated.get("allowed_redirect_uris") or [""]
-                        )[0]
-                        return self.async_create_entry(title="", data=options)
+                # Always continue to the staged GPT setup/review page. Even a
+                # signature-only, callback-only or no-op submission must show
+                # the generated setup links/instructions before final save.
                 return await self._stage_and_show_setup(raw, updated, rotate_secret)
             except ValueError:
                 errors["base"] = "invalid_options"
