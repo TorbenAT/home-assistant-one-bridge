@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "One Bridge",
+  "domain": "one_bridge",
+  "api_version": 1,
+  "api_prefix": "/api/one_bridge/v1",
+  "public_repository": "https://github.com/TorbenAT/home-assistant-one-bridge",
+  "version": "0.9.11",
+  "homeassistant_min": "2025.10.0",
+  "tag": "v0.9.11",
+  "tree_sha256": "c3f3cc3be52a74bc06de8bef28173b114b48cf718fb449ef04b694990311ddb9",
+  "license_included": true
+}

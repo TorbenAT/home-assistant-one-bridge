@@ -1,0 +1,1333 @@
+"""Orchestration for One Bridge v2."""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import os
+from pathlib import Path
+from typing import Any
+
+from homeassistant.core import HomeAssistant
+
+from .audit import AuditLog
+from .auth import BridgeAuthContext, BridgeAuthorizer
+from .backup import BackupManager
+from .config import BridgeConfig
+from .const import BOOTSTRAP_VERSION
+from .deployment import DeploymentManager
+from .entity import get_states, search_entities
+from .file_ops import apply_file, list_files, prepare_file, prepare_file_patch, read_file, resolve_path, search_files, validate_file
+from .operations import (
+    apps_list,
+    audit_search,
+    automation_traces,
+    backups_list,
+    calendar_events,
+    config_entries_get,
+    config_entries_list,
+    dashboard_get,
+    dashboard_list,
+    esphome_build_start,
+    esphome_build_status,
+    esphome_upload_preflight,
+    esphome_upload_start,
+    history,
+    logbook,
+    logs_get,
+    registry_get,
+    registry_list,
+    services_list,
+    statistics,
+    supervisor_info,
+    target_resolve,
+    template_render,
+    updates_list,
+)
+from .dispatch import (
+    OperationCatalog,
+    SystemOperations,
+    validate_apply_envelope,
+    validate_dispatch_envelope,
+)
+from .helpers import HelperManager
+from .lovelace import LovelaceManager
+from .models import (
+    BLOCKED_SERVICE_DOMAINS,
+    SuiteBridgeError,
+    enforce_capability_policy,
+    sequence_action_call,
+    supervisor_endpoint,
+)
+from .idempotency import IdempotencyStore
+from .models import digest_json, json_safe
+from .prepared import PreparedMutationStore
+from .registry import RegistryManager
+
+DISPATCH_OPERATION_HANDLERS = frozenset(
+    {
+        "system.status",
+        "system.catalog",
+        "system.capabilities",
+        "system.apply.status",
+        "system.prepare.status",
+        "system.audit.search",
+        "ha.entity.search",
+        "ha.state.get",
+        "ha.calendar.events",
+        "ha.history.get",
+        "ha.statistics.get",
+        "ha.logbook.get",
+        "ha.template.render",
+        "ha.services.list",
+        "ha.target.resolve",
+        "ha.registry.list",
+        "ha.registry.get",
+        "ha.config_entries.list",
+        "ha.config_entries.get",
+        "ha.automation.traces",
+        "ha.dashboard.list",
+        "ha.dashboard.get",
+        "ha.logs.get",
+        "ha.supervisor.info",
+        "ha.apps.list",
+        "ha.backups.list",
+        "ha.updates.list",
+        "ha.hacs.repository.get",
+        "files.list",
+        "files.read",
+        "files.search",
+        "files.diff",
+        "change.prepare.service",
+        "change.prepare.sequence",
+        "change.prepare.file",
+        "change.prepare.file_patch",
+        "esphome.config.validate",
+        "esphome.build.start",
+        "esphome.build.status",
+        "esphome.upload.prepare",
+        "esphome.device.status",
+        "esphome.logs.get",
+        "change.prepare.registry",
+        "change.prepare.hacs_repository_remove",
+        "change.prepare.dashboard",
+        "change.prepare.config_entry",
+        "change.prepare.supervisor",
+        "change.prepare.core",
+    }
+)
+APPLY_OPERATION_HANDLERS = frozenset({"change.apply"})
+IMPLEMENTED_OPERATIONS = DISPATCH_OPERATION_HANDLERS | APPLY_OPERATION_HANDLERS
+
+# Explicit mutation outcome states. A failure's outcome decides whether the
+# idempotency record is dropped (retry-safe) or kept (a retry must replay the
+# recorded result instead of re-executing an already-applied mutation).
+OUTCOME_NOT_APPLIED = "not_applied"
+OUTCOME_APPLIED_VERIFIED = "applied_verified"
+OUTCOME_APPLIED_UNVERIFIED = "applied_unverified"
+OUTCOME_PARTIALLY_APPLIED = "partially_applied"
+OUTCOME_UNKNOWN = "unknown"
+
+
+def _failure_outcome(err: BaseException) -> str:
+    """Classify a failed mutation as not_applied / partially / unverified / unknown."""
+    if isinstance(err, SuiteBridgeError):
+        details = err.details if isinstance(err.details, dict) else {}
+        marked = str(details.get("outcome") or "").strip()
+        if marked:
+            # Only handlers mark outcomes after the point of no return.
+            return marked
+        # Contract errors without a marker are raised at the send boundary or
+        # before it (prepare lookup, digest mismatch, pre-state checks), so
+        # nothing executed and the same idempotency_key may safely retry.
+        return OUTCOME_NOT_APPLIED
+    # An unexpected non-contract failure leaves whether anything executed
+    # unknowable; conservatively keep the idempotency record.
+    return OUTCOME_UNKNOWN
+
+
+def _success_outcome(result: dict[str, Any], operation: str) -> str:
+    if operation == "sequence.call" and result.get("executed") is True:
+        # Every action was acked by a blocking service call.
+        return OUTCOME_APPLIED_VERIFIED
+    if result.get("verified") is True:
+        return OUTCOME_APPLIED_VERIFIED
+    # Sent and acked without (or with pending) independent verification.
+    return OUTCOME_APPLIED_UNVERIFIED
+
+
+class SuiteBridgeEngine:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        config: BridgeConfig,
+        authorizer: BridgeAuthorizer,
+        audit: AuditLog,
+        prepared: PreparedMutationStore,
+        catalog: OperationCatalog,
+    ) -> None:
+        self.hass = hass
+        self.config = config
+        self.authorizer = authorizer
+        self.audit = audit
+        self.prepared = prepared
+        self.catalog = catalog
+        self.backups = BackupManager(hass)
+        self.lovelace = LovelaceManager(
+            hass, config, prepared, self.backups, audit
+        )
+        self.registry = RegistryManager(
+            hass, config, prepared, self.backups, audit
+        )
+        self.helpers = HelperManager(
+            hass, config, prepared, self.backups, audit, self.lovelace
+        )
+        self.deployment = DeploymentManager(hass, config)
+        self.change_idempotency = IdempotencyStore()
+        self.implemented_operations = IMPLEMENTED_OPERATIONS
+        if self.catalog.names != self.implemented_operations:
+            missing = sorted(self.catalog.names - self.implemented_operations)
+            extra = sorted(self.implemented_operations - self.catalog.names)
+            raise RuntimeError(
+                f"Operation handler registry drift; missing={missing}; extra={extra}"
+            )
+        self.system_operations = SystemOperations(self.catalog, self.implemented_operations)
+
+    def status(self, payload: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        del payload
+        return {
+            "api_version": 2,
+            "protocol": 2,
+            "enabled": self.config.enabled,
+            "installation_id": self.config.installation_id,
+            "role": self.config.role,
+            "oauth_bound": auth.oauth_bound,
+            "oauth_client_id": self.config.oauth_client_id,
+            "oauth_enforcement": self.config.enforce_oauth_client,
+            "persistent_refresh_token": self.config.persistent_refresh_token,
+            "read_only_lockdown": self.config.read_only_lockdown,
+            "internal_ws_mode": "custom" if self.config.internal_ws_url else "auto",
+            "internal_ws_url": self.config.internal_ws_url or None,
+            "internal_ws_verify_ssl": self.config.internal_ws_verify_ssl,
+            "config_sha256": self.config.config_sha256,
+            "capabilities": sorted(self.config.capabilities),
+            "raw_storage_access": False,
+        }
+
+    def _system_status(self, auth: BridgeAuthContext) -> dict[str, Any]:
+        return self.system_operations.status(self.status({}, auth))
+
+    def _system_catalog(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        items = self.catalog.list(
+            operation=arguments.get("operation"),
+            mode=arguments.get("mode"),
+            compact=False,
+        )
+        items = [
+            item
+            for item in items
+            if item.get("capability") in self.config.capabilities
+            and (not self.config.read_only_lockdown or item.get("mode") == "read")
+        ]
+        for item in items:
+            item["implemented"] = item["name"] in self.implemented_operations
+        if bool(arguments.get("compact", False)):
+            items = [
+                {
+                    "name": item["name"],
+                    "mode": item.get("mode"),
+                    "risk": item.get("risk"),
+                    "description": item.get("description"),
+                    "implemented": item.get("implemented", False),
+                }
+                for item in items
+            ]
+        return {
+            "schema_version": self.catalog.schema_version,
+            "catalog_version": self.catalog.catalog_version,
+            "permission_preset": self.config.permission_preset,
+            "capabilities": sorted(self.config.capabilities),
+            "read_only_lockdown": self.config.read_only_lockdown,
+            "operations": items,
+        }
+
+    def _system_capabilities(self) -> dict[str, Any]:
+        result = self.system_operations.capabilities()
+        result["permission_preset"] = self.config.permission_preset
+        result["allowed_capabilities"] = sorted(self.config.capabilities)
+        result["read_only_lockdown"] = self.config.read_only_lockdown
+        return result
+
+    def _system_apply_status(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        prepare_id = str(arguments.get("prepare_id", "")).strip()
+        request_id = str(arguments.get("request_id", "")).strip()
+        idempotency_key = str(arguments.get("idempotency_key", "")).strip()
+        if not any((prepare_id, request_id, idempotency_key)):
+            raise SuiteBridgeError(
+                "APPLY_STATUS_SELECTOR_REQUIRED",
+                "Angiv prepare_id, request_id eller idempotency_key.",
+                422,
+            )
+        item = self.audit.find_latest(
+            prepare_id=prepare_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+        selector = {
+            key: value
+            for key, value in {
+                "prepare_id": prepare_id,
+                "request_id": request_id,
+                "idempotency_key": idempotency_key,
+            }.items()
+            if value
+        }
+        if item is None:
+            return {"found": False, "selector": selector}
+        allowed = (
+            "audit_id",
+            "timestamp",
+            "operation",
+            "prepare_id",
+            "request_id",
+            "idempotency_key",
+            "result",
+            "details",
+            "error",
+            "message",
+        )
+        receipt = {key: item[key] for key in allowed if key in item}
+        return {
+            "found": True,
+            "selector": selector,
+            "status": item.get("result"),
+            "receipt": receipt,
+        }
+
+    async def _system_prepare_status(
+        self, arguments: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        return await self.prepared.status(
+            prepare_id=str(arguments["prepare_id"]).strip(),
+            user_id=auth.user_id,
+            refresh_token_id=auth.refresh_token_id,
+        )
+
+    async def dispatch_request(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        """Dispatch with request-scoped audit context for all prepares."""
+        from .ws_client import command_timeout_token, reset_command_timeout
+
+        envelope = validate_dispatch_envelope(payload)
+        # Honor the documented timeout_seconds hint instead of ignoring it;
+        # ws_client clamps to its hard ceiling.
+        timeout_token = command_timeout_token(envelope.get("timeout_seconds") or 30)
+        try:
+            if envelope["mode"] != "prepare":
+                return await self._dispatch_request(payload, auth)
+            contract = self.catalog.resolve(
+                envelope["operation"], envelope["mode"], envelope["arguments"]
+            )
+            with self.audit.context(
+                auth.audit_metadata(
+                    capability=str(contract.get("capability")),
+                    operation=envelope["operation"],
+                    request_id=envelope.get("request_id"),
+                )
+            ):
+                return await self._dispatch_request(payload, auth)
+        finally:
+            reset_command_timeout(timeout_token)
+
+    def audit_context_for_direct_mutation(
+        self,
+        engine_method: str,
+        auth: BridgeAuthContext,
+        request_id: str,
+    ):
+        """Resolve the fail-closed contract used by a legacy mutation endpoint."""
+        direct_contracts = {
+            "prepare_lovelace_patch": (
+                "change.prepare.dashboard", "prepare", "lovelace:write", True
+            ),
+            "prepare_lovelace_metadata": (
+                "change.prepare.dashboard", "prepare", "lovelace:write", True
+            ),
+            "prepare_lovelace_rollback": (
+                "change.prepare.dashboard", "prepare", "lovelace:write", True
+            ),
+            "prepare_registry_change": (
+                "change.prepare.registry", "prepare", "registry:write", True
+            ),
+            # Helper writes are exposed only through the legacy direct route. Keep a
+            # direct canonical contract so audit records the same helpers:write
+            # capability that actually authorized the request, without broadening the
+            # generic dispatch catalog to control:write.
+            "prepare_helper_change": (
+                "change.prepare.helper", "prepare", "helpers:write", False
+            ),
+            "apply_mutation": ("change.apply", "apply", "mutation:apply", True),
+        }
+        try:
+            operation, mode, expected_capability, catalog_backed = direct_contracts[
+                engine_method
+            ]
+        except KeyError as err:
+            raise RuntimeError(
+                f"Mangler audit-kontrakt for direkte mutation: {engine_method}"
+            ) from err
+        if auth.capability != expected_capability:
+            raise RuntimeError(
+                f"Capability mismatch for direkte mutation: {engine_method}"
+            )
+        if catalog_backed:
+            contracts = self.catalog.list(operation=operation, mode=mode)
+            if (
+                len(contracts) != 1
+                or str(contracts[0]["capability"]) != expected_capability
+            ):
+                raise RuntimeError(
+                    f"Mangler entydig audit-kontrakt for direkte mutation: {engine_method}"
+                )
+        return self.audit.context(
+            auth.audit_metadata(
+                capability=expected_capability,
+                operation=operation,
+                request_id=request_id,
+            )
+        )
+
+    async def execute_direct_mutation(
+        self,
+        engine_method: str,
+        payload: dict[str, Any],
+        auth: BridgeAuthContext,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Execute a direct mutation with the same audit context as dispatch."""
+        with self.audit_context_for_direct_mutation(engine_method, auth, request_id):
+            method = getattr(self, engine_method)
+            result = method(payload, auth)
+            if hasattr(result, "__await__"):
+                result = await result
+            if engine_method != "apply_mutation" and "audit_id" not in result:
+                audit = await self.audit.append(
+                    {
+                        "prepare_id": str(result.get("prepare_id", "")),
+                        "result": "prepared",
+                    }
+                )
+                result = {**result, "audit_id": audit["audit_id"]}
+            return result
+
+    async def _dispatch_request(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        envelope = validate_dispatch_envelope(payload)
+        operation = envelope["operation"]
+        mode = envelope["mode"]
+        arguments = envelope["arguments"]
+        contract = self.catalog.resolve(operation, mode, arguments)
+        required_capability = contract.get("capability")
+        enforce_capability_policy(
+            capabilities=self.config.capabilities,
+            role=self.config.role,
+            read_only_lockdown=self.config.read_only_lockdown,
+            capability=str(required_capability),
+            mutation=mode == "prepare",
+        )
+        if operation == "system.status":
+            result = self._system_status(auth)
+        elif operation == "system.catalog":
+            result = self._system_catalog(arguments)
+        elif operation == "system.capabilities":
+            result = self._system_capabilities()
+        elif operation == "system.apply.status":
+            result = self._system_apply_status(arguments)
+        elif operation == "system.prepare.status":
+            result = await self._system_prepare_status(arguments, auth)
+        elif operation == "ha.entity.search":
+            result = search_entities(self.hass, arguments)
+        elif operation == "ha.calendar.events":
+            result = await calendar_events(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.state.get":
+            result = get_states(self.hass, arguments)
+        elif operation == "system.audit.search":
+            result = await audit_search(self.audit, arguments)
+        elif operation == "ha.history.get":
+            result = await history(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.statistics.get":
+            result = await statistics(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.logbook.get":
+            result = await logbook(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.template.render":
+            result = await template_render(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.services.list":
+            result = await services_list(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.target.resolve":
+            result = await target_resolve(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.registry.list":
+            result = await registry_list(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.registry.get":
+            result = await registry_get(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.config_entries.list":
+            result = await config_entries_list(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.config_entries.get":
+            result = await config_entries_get(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.automation.traces":
+            result = await automation_traces(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.dashboard.list":
+            result = await self.lovelace.list_dashboards(auth.refresh_token_id, arguments)
+        elif operation == "ha.dashboard.get":
+            result = await self.lovelace.get_dashboard(arguments)
+        elif operation == "ha.logs.get":
+            result = await logs_get(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.supervisor.info":
+            result = await supervisor_info(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.apps.list":
+            result = await apps_list(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.backups.list":
+            result = await backups_list(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.updates.list":
+            result = await updates_list(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.hacs.repository.get":
+            _, _, result = self._hacs_repository_snapshot(arguments["repository"])
+        elif operation == "files.list":
+            result = await self.hass.async_add_executor_job(list_files, self.hass, arguments)
+        elif operation == "files.read":
+            result = await self.hass.async_add_executor_job(read_file, self.hass, arguments)
+        elif operation == "files.search":
+            result = await self.hass.async_add_executor_job(search_files, self.hass, arguments)
+        elif operation == "files.diff":
+            result = await self.hass.async_add_executor_job(prepare_file, self.hass, arguments)
+            result.pop("new_content", None)
+        elif operation == "change.prepare.file":
+            result = await self._prepare_file(arguments, auth)
+        elif operation == "change.prepare.file_patch":
+            result = await self._prepare_file_patch(arguments, auth)
+        elif operation == "esphome.config.validate":
+            result = await self.hass.async_add_executor_job(validate_file, self.hass, {**arguments, "validation_profile": "esphome_yaml"})
+        elif operation == "esphome.build.start":
+            result = await esphome_build_start(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "esphome.build.status":
+            result = await esphome_build_status(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "esphome.upload.prepare":
+            result = await self._prepare_esphome_upload(arguments, auth)
+        elif operation == "esphome.device.status":
+            states = get_states(self.hass, {"entity_ids": arguments["entity_ids"], "include_attributes": bool(arguments.get("include_attributes", False))})
+            unavailable = [item["entity_id"] for item in states["states"] if item["state"] in {"unavailable", "unknown"}]
+            result = {**states, "available": not unavailable, "unavailable_entities": unavailable}
+        elif operation == "esphome.logs.get":
+            result = await logs_get(self.hass, auth.refresh_token_id, {"source": "core", "contains": arguments["device"], "lines": arguments.get("lines", 100)})
+            result["device"] = arguments["device"]
+        elif operation == "change.prepare.service":
+            result = await self._prepare_service(arguments, auth)
+        elif operation == "change.prepare.sequence":
+            result = await self._prepare_sequence(arguments, auth)
+        elif operation == "change.prepare.registry":
+            result = await self._prepare_registry(arguments, auth)
+        elif operation == "change.prepare.hacs_repository_remove":
+            result = await self._prepare_hacs_repository_remove(arguments, auth)
+        elif operation == "change.prepare.dashboard":
+            result = await self._prepare_dashboard(arguments, auth)
+        elif operation == "change.prepare.config_entry":
+            result = await self._prepare_config_entry(arguments, auth)
+        elif operation == "change.prepare.supervisor":
+            result = await self._prepare_supervisor(arguments, auth)
+        elif operation == "change.prepare.core":
+            result = await self._prepare_core(arguments, auth)
+        else:
+            raise RuntimeError(
+                f"Operation handler registry drift for dispatch: {operation}"
+            )
+        if mode == "prepare":
+            await self.audit.append(
+                {
+                    **auth.audit_metadata(
+                        capability=str(required_capability),
+                        operation=operation,
+                        request_id=envelope.get("request_id"),
+                    ),
+                    "prepare_id": str(result.get("prepare_id", "")),
+                    "result": "prepared",
+                }
+            )
+        return {
+            "request_id": envelope.get("request_id"),
+            "operation": operation,
+            "mode": mode,
+            "result": result,
+        }
+
+    @staticmethod
+    def _prepared_response(item: Any) -> dict[str, Any]:
+        result = {
+            "prepare_id": item.prepare_id,
+            "request_digest": item.digest,
+            "digest": item.digest,
+            "expires_at": item.expires_at,
+            "risk": item.risk,
+            "normalized_change": json_safe(item.normalized_change),
+        }
+        if item.operation == "file.update":
+            material = item.material
+            result.update({
+                "target": {"root": material["root"], "path": material["path"]},
+                "before": {"sha256": material["before_sha256"]},
+                "after": {"sha256": material["after_sha256"]},
+                "patch_ranges": material.get("patches", []),
+                "diff": material.get("diff", ""),
+                "validation": material.get("validation", {"ok": True, "profile": None}),
+            })
+        return result
+
+    async def _prepare_file(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        material = await self.hass.async_add_executor_job(prepare_file, self.hass, arguments)
+        item = await self.prepared.create(
+            user_id=auth.user_id, refresh_token_id=auth.refresh_token_id,
+            operation="file.update", normalized_change={k: v for k, v in material.items() if k != "new_content"},
+            material=material, risk="normal",
+        )
+        await self.audit.append({"operation": "change.prepare.file", "user_id": auth.user_id, "prepare_id": item.prepare_id, "root": material["root"], "path": material["path"], "before_sha256": material["before_sha256"], "after_sha256": material["after_sha256"], "result": "prepared"})
+        return self._prepared_response(item)
+
+    async def _prepare_file_patch(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        material = await self.hass.async_add_executor_job(prepare_file_patch, self.hass, arguments)
+        item = await self.prepared.create(
+            user_id=auth.user_id, refresh_token_id=auth.refresh_token_id,
+            operation="file.update", normalized_change={k: v for k, v in material.items() if k != "new_content"},
+            material=material, risk="normal",
+        )
+        await self.audit.append({"operation": "change.prepare.file_patch", "user_id": auth.user_id, "prepare_id": item.prepare_id, "root": material["root"], "path": material["path"], "before_sha256": material["before_sha256"], "after_sha256": material["after_sha256"], "result": "prepared"})
+        return self._prepared_response(item)
+
+    async def _prepare_esphome_upload(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        device = str(arguments["device"]).strip()
+        build_job_id = str(arguments["build_job_id"]).strip()
+        preflight = await esphome_upload_preflight(
+            self.hass, auth.refresh_token_id, device, build_job_id
+        )
+        source_path = Path(self.hass.config.path("esphome", preflight["configuration"]))
+        source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        material = {
+            "device": device,
+            "configuration": preflight["configuration"],
+            "build_job_id": build_job_id,
+            "source_sha256": source_sha256,
+            "target": "OTA",
+            "bootloader": False,
+            "binaries": preflight["binaries"],
+            "builder": preflight["builder"],
+        }
+        normalized = {
+            **material,
+            "build_job": {
+                "job_id": preflight["build_job"].get("job_id"),
+                "job_type": preflight["build_job"].get("job_type"),
+                "status": preflight["build_job"].get("status"),
+                "configuration": preflight["build_job"].get("configuration"),
+            },
+        }
+        item = await self.prepared.create(
+            user_id=auth.user_id,
+            refresh_token_id=auth.refresh_token_id,
+            operation="esphome.upload",
+            normalized_change=normalized,
+            material=material,
+            risk="high",
+        )
+        await self.audit.append({
+            "operation": "esphome.upload.prepare",
+            "user_id": auth.user_id,
+            "prepare_id": item.prepare_id,
+            "device": device,
+            "configuration": preflight["configuration"],
+            "build_job_id": build_job_id,
+            "source_sha256": source_sha256,
+            "result": "prepared",
+        })
+        return self._prepared_response(item)
+
+    async def _prepare_service(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        domain, service = str(arguments["domain"]).strip(), str(arguments["service"]).strip()
+        if domain in BLOCKED_SERVICE_DOMAINS:
+            raise SuiteBridgeError("SERVICE_DENIED", "Denne service-type er ikke tilladt via Bridge.", 403)
+        if not self.hass.services.has_service(domain, service):
+            raise SuiteBridgeError("SERVICE_NOT_FOUND", "Servicen findes ikke.", 404)
+        expected = arguments.get("expected") or {}
+        if not isinstance(expected, dict):
+            raise SuiteBridgeError("INVALID_SERVICE_VERIFICATION", "expected skal være et objekt.", 422)
+        entity_ids = expected.get("entity_ids", [])
+        not_states = expected.get("not_states", ["unavailable"])
+        if not isinstance(entity_ids, list) or not all(isinstance(value, str) and value for value in entity_ids):
+            raise SuiteBridgeError("INVALID_SERVICE_VERIFICATION", "expected.entity_ids skal være en liste af entity_id'er.", 422)
+        if not isinstance(not_states, list) or not all(isinstance(value, str) for value in not_states):
+            raise SuiteBridgeError("INVALID_SERVICE_VERIFICATION", "expected.not_states skal være en tekstliste.", 422)
+        material = {"domain": domain, "service": service, "target": arguments.get("target") or {}, "data": arguments.get("data") or {}, "expected": {"entity_ids": entity_ids, "not_states": not_states}, "verify": bool(arguments.get("verify", True))}
+        item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="service.call", normalized_change={k: json_safe(v) for k, v in material.items() if k != "data"}, material=material, risk="normal")
+        return self._prepared_response(item)
+
+    async def _prepare_sequence(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        actions = arguments["actions"]
+        if not isinstance(actions, list) or not actions or len(actions) > 25 or not all(isinstance(a, dict) for a in actions):
+            raise SuiteBridgeError("INVALID_SEQUENCE", "actions skal være 1-25 objekter.", 400)
+        # Enforce the same service-domain deny-list and service existence as a
+        # single service.call for every action before anything is prepared.
+        for action in actions:
+            domain, service = sequence_action_call(action)
+            if not self.hass.services.has_service(domain, service):
+                raise SuiteBridgeError("SERVICE_NOT_FOUND", "Servicen findes ikke.", 404)
+        if bool(arguments.get("verify_each", False)):
+            # Honor-or-reject: there is no per-action observable to verify an
+            # arbitrary service call against, so an explicit request is
+            # refused instead of being captured and silently ignored by apply.
+            raise SuiteBridgeError(
+                "SEQUENCE_VERIFY_UNSUPPORTED",
+                "verify_each understøttes ikke for generiske services; udelad flaget eller del sekvensen op.",
+                422,
+            )
+        material = {"actions": json_safe(actions), "stop_on_error": bool(arguments.get("stop_on_error", True)), "verify_each": False}
+        item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="sequence.call", normalized_change=material, material=material, risk="high")
+        return self._prepared_response(item)
+
+    def _hacs_repository_snapshot(
+        self, repository_name: str
+    ) -> tuple[Any, Any, dict[str, Any]]:
+        repository_key = str(repository_name).strip().lower()
+        if not repository_key or "/" not in repository_key:
+            raise SuiteBridgeError(
+                "INVALID_HACS_REPOSITORY",
+                "repository skal være angivet som owner/repository.",
+                400,
+            )
+        hacs = self.hass.data.get("hacs")
+        if hacs is None:
+            raise SuiteBridgeError("HACS_NOT_LOADED", "HACS er ikke indlæst.", 409)
+        repositories = getattr(hacs, "repositories", None)
+        getter = getattr(repositories, "get_by_full_name", None)
+        if getter is None:
+            raise SuiteBridgeError("HACS_UNAVAILABLE", "HACS repository-register er ikke tilgængeligt.", 409)
+        repository = getter(repository_key)
+        if repository is None:
+            raise SuiteBridgeError(
+                "HACS_REPOSITORY_NOT_FOUND",
+                f"HACS repository blev ikke fundet: {repository_key}",
+                404,
+            )
+        data = getattr(repository, "data", None)
+        if data is None:
+            raise SuiteBridgeError("HACS_REPOSITORY_INVALID", "HACS repository mangler data.", 409)
+        category = getattr(data, "category", None)
+        snapshot = json_safe(
+            {
+                "repository": str(getattr(data, "full_name", repository_key)),
+                "repository_id": str(getattr(data, "id", "")),
+                "category": getattr(category, "value", category),
+                "installed": bool(getattr(data, "installed", False)),
+                "installed_version": getattr(data, "installed_version", None),
+                "archived": bool(getattr(data, "archived", False)),
+                "disabled": bool(getattr(data, "disabled", False)),
+            }
+        )
+        return hacs, repository, snapshot
+
+    async def _prepare_hacs_repository_remove(
+        self, arguments: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        _, _, before = self._hacs_repository_snapshot(arguments["repository"])
+        if not before["installed"]:
+            raise SuiteBridgeError(
+                "HACS_REPOSITORY_NOT_INSTALLED",
+                "Repository er allerede afinstalleret i HACS.",
+                409,
+            )
+        material = {
+            "repository": before["repository"],
+            "repository_id": before["repository_id"],
+            "before": before,
+            "before_sha256": digest_json(before),
+        }
+        item = await self.prepared.create(
+            user_id=auth.user_id,
+            refresh_token_id=auth.refresh_token_id,
+            operation="hacs.repository.remove",
+            normalized_change={
+                "repository": before["repository"],
+                "category": before["category"],
+                "installed_version": before["installed_version"],
+                "effect": "uninstall_repository_and_remove_dashboard_resources",
+            },
+            material=material,
+            risk="critical",
+        )
+        return self._prepared_response(item)
+
+    async def _prepare_registry(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        registry = arguments["registry"]
+        if registry not in {"entity", "device"}:
+            raise SuiteBridgeError("REGISTRY_WRITE_DENIED", "Kun entity- og device-registry kan ændres.", 403)
+        payload = {"kind": registry, "object_id": arguments["id"], "changes": arguments["changes"], "expected_sha256": arguments.get("expected_version") or ""}
+        return await self.prepare_registry_change(payload, auth)
+
+    async def _prepare_dashboard(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        dashboard, normalized = self.lovelace._dashboard(arguments.get("url_path"))
+        before = await dashboard.async_load(False)
+        before_sha = digest_json(before)
+        if before_sha != arguments["expected_sha256"]:
+            raise SuiteBridgeError("DASHBOARD_CHANGED", "Dashboardets SHA-256 matcher ikke.", 409)
+        material = {"url_path": normalized, "before": before, "after": arguments["config"], "before_sha256": before_sha}
+        item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="dashboard.replace", normalized_change={"url_path": normalized, "before_sha256": before_sha, "after_sha256": digest_json(arguments["config"])}, material=material, risk="high")
+        return self._prepared_response(item)
+
+    async def _prepare_config_entry(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        entry = self.hass.config_entries.async_get_entry(arguments["entry_id"])
+        if entry is None:
+            raise SuiteBridgeError("CONFIG_ENTRY_NOT_FOUND", "Config entry blev ikke fundet.", 404)
+        action = arguments["action"]
+        if action in {"reauth", "reconfigure"}:
+            raise SuiteBridgeError("CONFIG_ENTRY_ACTION_UNSUPPORTED", "Denne handling kræver en interaktiv HA-flow.", 409)
+        material = {"entry_id": entry.entry_id, "action": action, "options": arguments.get("options") or {}, "before_state": entry.state.value, "before_options": dict(entry.options)}
+        item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="config_entry.update", normalized_change=material, material=material, risk="high")
+        return self._prepared_response(item)
+
+    async def _prepare_supervisor(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        # The authoritative resource/action matrix lives in models.py;
+        # supervisor_endpoint enforces it for prepare and apply alike.
+        supervisor_endpoint(arguments.get("resource"), arguments.get("target"), arguments["action"])
+        material = json_safe(arguments)
+        item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="supervisor.action", normalized_change=material, material=material, risk="critical")
+        return self._prepared_response(item)
+
+    async def _prepare_core(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        action = arguments["action"]
+        material = {"action": action, "scope": arguments.get("scope")}
+        risk = "normal" if action == "check_config" else ("high" if action == "reload" else "critical")
+        item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="core.action", normalized_change=material, material=material, risk=risk)
+        return self._prepared_response(item)
+
+    async def apply_request(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        """Apply with request-scoped audit context for all mutations."""
+        from .ws_client import command_timeout_token, reset_command_timeout
+
+        envelope = validate_apply_envelope(payload)
+        timeout_token = command_timeout_token(envelope.get("timeout_seconds") or 60)
+        try:
+            contract = self.catalog.resolve(
+                envelope["operation"], "apply", envelope["arguments"]
+            )
+            with self.audit.context(
+                auth.audit_metadata(
+                    capability=str(contract.get("capability")),
+                    operation=envelope["operation"],
+                    request_id=envelope.get("request_id"),
+                )
+            ):
+                return await self._apply_request(payload, auth)
+        finally:
+            reset_command_timeout(timeout_token)
+
+    async def _apply_request(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        envelope = validate_apply_envelope(payload)
+        operation = envelope["operation"]
+        arguments = envelope["arguments"]
+        contract = self.catalog.resolve(operation, "apply", arguments)
+        required_capability = contract.get("capability")
+        enforce_capability_policy(
+            capabilities=self.config.capabilities,
+            role=self.config.role,
+            read_only_lockdown=self.config.read_only_lockdown,
+            capability=str(required_capability),
+            mutation=True,
+        )
+        audit_metadata = auth.audit_metadata(
+            capability=str(required_capability),
+            operation=operation,
+            request_id=envelope.get("request_id"),
+        )
+        if operation == "change.apply":
+            key = arguments["idempotency_key"]
+            fingerprint = json.dumps(
+                {
+                    "arguments": arguments,
+                    "user_id": auth.user_id,
+                    "refresh_token_id": auth.refresh_token_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            receipt_base = {
+                **audit_metadata,
+                "idempotency_key": key,
+                "prepare_id": arguments["prepare_id"],
+            }
+            await self.audit.append({**receipt_base, "result": "received"})
+            execute, cached = await self.change_idempotency.begin(key, fingerprint)
+            if execute:
+                await self.audit.append({**receipt_base, "result": "started"})
+                try:
+                    result = await self.apply_mutation(
+                        {
+                            "prepare_id": arguments["prepare_id"],
+                            "request_digest": arguments["expected_digest"],
+                            "confirmed": arguments["confirmed"],
+                        },
+                        auth,
+                    )
+                except Exception as err:
+                    outcome = _failure_outcome(err)
+                    if outcome == OUTCOME_NOT_APPLIED:
+                        # Nothing executed: drop the record so the same
+                        # idempotency_key can safely retry the mutation.
+                        await self.change_idempotency.abort(key, fingerprint)
+                        audit_result = "failed_not_applied"
+                    else:
+                        # The point of no return is behind us (or unknowable).
+                        # Keep the record so a retry with this key replays the
+                        # recorded outcome instead of re-executing the mutation.
+                        stored: dict[str, Any] = {
+                            "outcome": outcome,
+                            "error": {"type": type(err).__name__, "message": str(err)},
+                            "operation": operation,
+                            "prepare_id": arguments["prepare_id"],
+                        }
+                        if isinstance(err, SuiteBridgeError) and isinstance(err.details, dict):
+                            for detail_key in ("verification", "results", "failed_index", "remaining"):
+                                if detail_key in err.details:
+                                    stored[detail_key] = json_safe(err.details[detail_key])
+                        await self.change_idempotency.finish(key, fingerprint, stored)
+                        audit_result = f"failed_{outcome}"
+                    await self.audit.append(
+                        {
+                            **audit_metadata,
+                            "idempotency_key": key,
+                            "prepare_id": arguments["prepare_id"],
+                            "result": audit_result,
+                            "outcome": outcome,
+                            "error": type(err).__name__,
+                            "message": str(err),
+                        }
+                    )
+                    raise
+                await self.change_idempotency.finish(key, fingerprint, result)
+                await self.audit.append(
+                    {
+                        "operation": "change.apply.receipt",
+                        "request_id": envelope.get("request_id"),
+                        "idempotency_key": key,
+                        "prepare_id": arguments["prepare_id"],
+                        "result": "completed",
+                        "details": json_safe(result),
+                    }
+                )
+            else:
+                result = {**(cached or {}), "idempotent_replay": True}
+                await self.audit.append(
+                    {**receipt_base, "result": "replayed", "details": json_safe(result)}
+                )
+        else:
+            raise RuntimeError(
+                f"Operation handler registry drift for apply: {operation}"
+            )
+        return {
+            "request_id": envelope.get("request_id"),
+            "operation": operation,
+            "mode": "apply",
+            "result": result,
+        }
+
+    def audit_summary(self, payload: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
+        del auth
+        return self.audit.summary(int(payload.get("limit", 20)))
+
+    async def list_dashboards(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        return await self.lovelace.list_dashboards(auth.refresh_token_id, payload)
+
+    async def get_dashboard(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        del auth
+        return await self.lovelace.get_dashboard(payload)
+
+    async def list_resources(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        return await self.lovelace.list_resources(auth.refresh_token_id, payload)
+
+    async def prepare_lovelace_patch(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        return await self.lovelace.prepare_patch(
+            payload,
+            user_id=auth.user_id,
+            refresh_token_id=auth.refresh_token_id,
+        )
+
+    async def prepare_lovelace_metadata(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        return await self.lovelace.prepare_metadata(
+            auth.refresh_token_id,
+            payload,
+            user_id=auth.user_id,
+        )
+
+    async def prepare_lovelace_rollback(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        return await self.lovelace.prepare_rollback(
+            payload,
+            user_id=auth.user_id,
+            refresh_token_id=auth.refresh_token_id,
+        )
+
+    def search_registry(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        del auth
+        return self.registry.search(payload)
+
+    async def prepare_registry_change(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        return await self.registry.prepare_change(
+            payload,
+            user_id=auth.user_id,
+            refresh_token_id=auth.refresh_token_id,
+        )
+
+    async def list_helpers(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        return await self.helpers.list_helpers(auth.refresh_token_id, payload)
+
+    async def helper_references(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        del auth
+        return await self.helpers.references(str(payload.get("entity_id", "")))
+
+    async def prepare_helper_change(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        return await self.helpers.prepare_change(
+            auth.refresh_token_id,
+            payload,
+            user_id=auth.user_id,
+        )
+
+    async def list_backups(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        del auth
+        category = payload.get("category")
+        if category is not None and not isinstance(category, str):
+            raise SuiteBridgeError("INVALID_BACKUP_CATEGORY", "category skal være tekst.")
+        return {"backups": await self.backups.list(category)}
+
+    async def read_backup(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        del auth
+        backup_id = str(payload.get("backup_id", "")).strip()
+        if not backup_id:
+            raise SuiteBridgeError("BACKUP_ID_REQUIRED", "backup_id er obligatorisk.")
+        return await self.backups.read(backup_id)
+
+    async def deployment_status(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        del auth
+        return await self.deployment.status(payload)
+
+    async def apply_mutation(
+        self, payload: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        prepare_id = str(payload.get("prepare_id", "")).strip()
+        digest = str(payload.get("request_digest", "")).strip()
+        item = await self.prepared.begin_apply(
+            prepare_id=prepare_id,
+            digest=digest,
+            user_id=auth.user_id,
+            refresh_token_id=auth.refresh_token_id,
+            confirmed=payload.get("confirmed") is True,
+            confirmation_text=payload.get("confirmation_text"),
+        )
+        try:
+            if item.operation in {"lovelace.patch", "lovelace.rollback"}:
+                result = await self.lovelace.apply(item, user_id=auth.user_id)
+            elif item.operation.startswith("lovelace.metadata."):
+                result = await self.lovelace.apply_metadata(
+                    item,
+                    user_id=auth.user_id,
+                    refresh_token_id=auth.refresh_token_id,
+                )
+            elif item.operation.startswith("registry."):
+                result = await self.registry.apply(item, user_id=auth.user_id)
+            elif item.operation.startswith("helper."):
+                result = await self.helpers.apply(
+                    item,
+                    user_id=auth.user_id,
+                    refresh_token_id=auth.refresh_token_id,
+                )
+            elif item.operation == "file.update":
+                _, _, before_path = resolve_path(self.hass, item.material["root"], item.material["path"], write=True)
+                before_bytes = before_path.read_bytes()
+                before_mode = before_path.stat().st_mode
+                backup = await self.backups.create(
+                    "files",
+                    item.material["path"],
+                    operation=item.operation,
+                    installation_id=self.config.installation_id,
+                    data={"root": item.material["root"], "path": item.material["path"], "content": before_path.read_text(encoding="utf-8")},
+                    source_sha256=item.material["before_sha256"],
+                )
+                try:
+                    result = await self.hass.async_add_executor_job(apply_file, self.hass, item)
+                except Exception:
+                    rollback_tmp = before_path.with_name(before_path.name + ".gpt-bridge-rollback.tmp")
+                    rollback_tmp.write_bytes(before_bytes)
+                    os.chmod(rollback_tmp, before_mode)
+                    os.replace(rollback_tmp, before_path)
+                    raise
+                result["backup"] = backup
+                result.update({
+                    "verified": result["sha256"] == item.material["after_sha256"],
+                    "before": {"sha256": item.material["before_sha256"]},
+                    "after": {"sha256": item.material["after_sha256"]},
+                    "validation": item.material.get("validation", {"ok": True, "profile": None}),
+                })
+            elif item.operation == "esphome.upload":
+                material = item.material
+                source_path = Path(self.hass.config.path("esphome", material["configuration"]))
+                if not source_path.is_file():
+                    raise SuiteBridgeError("ESPHOME_CONFIG_NOT_FOUND", "ESPHome-konfigurationen forsvandt efter prepare.", 409)
+                current_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+                if current_sha256 != material["source_sha256"]:
+                    raise SuiteBridgeError("ESPHOME_CONFIG_CHANGED", "ESPHome-konfigurationen er ændret efter upload-prepare.", 409)
+                preflight = await esphome_upload_preflight(
+                    self.hass,
+                    auth.refresh_token_id,
+                    material["device"],
+                    material["build_job_id"],
+                )
+                result = await esphome_upload_start(
+                    self.hass, auth.refresh_token_id, material["configuration"]
+                )
+                result["preflight"] = {
+                    "build_job_id": material["build_job_id"],
+                    "source_sha256": current_sha256,
+                    "binary_count": len(preflight["binaries"]),
+                }
+                result["verified"] = bool(result.get("job", {}).get("job_id"))
+                result["verification_pending"] = True
+                await self.audit.append({
+                    "operation": item.operation,
+                    "user_id": auth.user_id,
+                    "prepare_id": prepare_id,
+                    "device": material["device"],
+                    "job_id": result.get("job", {}).get("job_id"),
+                    "result": "upload_queued",
+                })
+            elif item.operation == "service.call":
+                material = item.material
+                await self.hass.services.async_call(
+                    material["domain"], material["service"],
+                    service_data=material["data"], target=material["target"], blocking=True,
+                )
+                result = {"executed": True, "domain": material["domain"], "service": material["service"]}
+                if material["verify"] and material["expected"]["entity_ids"]:
+                    rejected = set(material["expected"]["not_states"])
+                    states = []
+                    for entity_id in material["expected"]["entity_ids"]:
+                        state = self.hass.states.get(entity_id)
+                        value = None if state is None else state.state
+                        states.append({"entity_id": entity_id, "state": value})
+                    failed = [entry["entity_id"] for entry in states if entry["state"] is None or entry["state"] in rejected]
+                    result["verification"] = {"verified": not failed, "states": states, "failed_entities": failed}
+                    if failed:
+                        # The blocking call already returned: the mutation was
+                        # SENT successfully and only the post-check failed.
+                        # The outcome marker keeps the idempotency record so a
+                        # retry replays this result instead of re-executing.
+                        raise SuiteBridgeError(
+                            "POST_APPLY_VERIFICATION_FAILED",
+                            "Servicen blev kørt, men de forventede entities bestod ikke efterverifikation.",
+                            409,
+                            details={"outcome": "applied_unverified", **result["verification"]},
+                        )
+                    result["verified"] = True
+            elif item.operation == "sequence.call":
+                results = []
+                # stop_on_error defaults True; verify_each is accepted by the
+                # contract but has no per-action observable to verify against,
+                # so it is rejected at prepare time rather than ignored here.
+                stop_on_error = bool(item.material.get("stop_on_error", True))
+                for index, action in enumerate(item.material["actions"], 1):
+                    # Re-run the shared parser so the blocked-domain deny-list
+                    # also guards prepared items created by older versions.
+                    domain, service = sequence_action_call(action)
+                    try:
+                        await self.hass.services.async_call(domain, service, service_data=action.get("data") or {}, target=action.get("target") or {}, blocking=True)
+                    except Exception as err:
+                        if isinstance(err, SuiteBridgeError):
+                            raise
+                        entry = {"domain": domain, "service": service, "ok": False, "error": type(err).__name__}
+                        results.append(entry)
+                        if stop_on_error:
+                            result = {
+                                "executed": False,
+                                "results": results,
+                                "failed_index": index,
+                                "remaining": len(item.material["actions"]) - index,
+                            }
+                            break
+                        continue
+                    results.append({"domain": domain, "service": service, "ok": True})
+                else:
+                    result = {"executed": True, "results": results}
+                if not result.get("executed"):
+                    # Earlier actions already ran (blocking acks): the sequence
+                    # is partially applied. The outcome marker preserves the
+                    # per-step results so retries never replay completed steps.
+                    raise SuiteBridgeError(
+                        "SEQUENCE_ACTION_FAILED",
+                        f"Sekvenshandling {result.get('failed_index')} fejlede; de resterende handlinger blev ikke kørt.",
+                        409,
+                        details={
+                            "outcome": "partially_applied",
+                            "results": json_safe(result.get("results", [])),
+                            "failed_index": result.get("failed_index"),
+                            "remaining": result.get("remaining"),
+                        },
+                    )
+            elif item.operation == "dashboard.replace":
+                dashboard, _ = self.lovelace._dashboard(item.material.get("url_path"))
+                current = await dashboard.async_load(False)
+                if digest_json(current) != item.material["before_sha256"]:
+                    raise SuiteBridgeError("DASHBOARD_CHANGED", "Dashboardet er ændret efter prepare.", 409)
+                await dashboard.async_save(item.material["after"])
+                result = {"executed": True, "sha256": digest_json(item.material["after"])}
+            elif item.operation == "hacs.repository.remove":
+                hacs, repository, current = self._hacs_repository_snapshot(
+                    item.material["repository"]
+                )
+                if current["repository_id"] != item.material["repository_id"]:
+                    raise SuiteBridgeError(
+                        "HACS_REPOSITORY_CHANGED",
+                        "HACS repository-id har ændret sig efter prepare.",
+                        409,
+                    )
+                if digest_json(current) != item.material["before_sha256"]:
+                    raise SuiteBridgeError(
+                        "HACS_REPOSITORY_CHANGED",
+                        "HACS repository har ændret sig efter prepare.",
+                        409,
+                    )
+                refresh_error = None
+                repository.data.new = False
+                try:
+                    await repository.update_repository(ignore_issues=True, force=True)
+                except Exception as err:
+                    refresh_error = type(err).__name__
+                await repository.uninstall()
+                await hacs.data.async_write()
+                installed_after = bool(getattr(repository.data, "installed", False))
+                result = {
+                    "executed": True,
+                    "verified": not installed_after,
+                    "repository": item.material["repository"],
+                    "before": current,
+                    "after": {"installed": installed_after},
+                    "refresh_error": refresh_error,
+                }
+                if installed_after:
+                    raise SuiteBridgeError(
+                        "POST_APPLY_VERIFICATION_FAILED",
+                        "HACS repository blev behandlet, men står stadig som installeret.",
+                        409,
+                        details={"outcome": "applied_unverified", **result},
+                    )
+                await self.audit.append(
+                    {
+                        "operation": item.operation,
+                        "user_id": auth.user_id,
+                        "prepare_id": prepare_id,
+                        "repository": item.material["repository"],
+                        "result": "removed",
+                        "details": json_safe(result),
+                    }
+                )
+            elif item.operation == "config_entry.update":
+                from homeassistant.config_entries import ConfigEntryState, ConfigEntryDisabler
+                entry = self.hass.config_entries.async_get_entry(item.material["entry_id"])
+                if entry is None:
+                    raise SuiteBridgeError("CONFIG_ENTRY_NOT_FOUND", "Config entry blev ikke fundet.", 404)
+                action = item.material["action"]
+                if action == "reload":
+                    result = {"reloaded": await self.hass.config_entries.async_reload(entry.entry_id)}
+                elif action == "enable":
+                    await self.hass.config_entries.async_set_disabled_by(entry.entry_id, None)
+                    result = {"enabled": True}
+                elif action == "disable":
+                    await self.hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+                    result = {"disabled": True}
+                else:
+                    self.hass.config_entries.async_update_entry(entry, options=item.material["options"])
+                    result = {"options_updated": True}
+            elif item.operation == "core.action":
+                action = item.material["action"]
+                if action == "check_config":
+                    await self.hass.services.async_call("homeassistant", "check_config", blocking=True)
+                    result = {"checked": True, "valid": True}
+                elif action == "reload":
+                    await self.hass.services.async_call("homeassistant", "reload_core_config", blocking=True)
+                    result = {"executed": True, "action": action, "service": "reload_core_config"}
+                else:
+                    await self.hass.services.async_call("homeassistant", action, blocking=True)
+                    result = {"executed": True, "action": action}
+                await self.audit.append(
+                    {
+                        "operation": item.operation,
+                        "user_id": auth.user_id,
+                        "prepare_id": prepare_id,
+                        "result": "executed",
+                        "details": json_safe(result),
+                    }
+                )
+            elif item.operation == "supervisor.action":
+                from .ws_client import async_ws_command
+                endpoint = supervisor_endpoint(
+                    item.material.get("resource"),
+                    item.material.get("target"),
+                    item.material["action"],
+                )
+                result = await async_ws_command(self.hass, auth.refresh_token_id, {"type": "supervisor/api", "endpoint": endpoint, "method": "post", "data": item.material.get("options") or {}})
+            else:
+                raise SuiteBridgeError(
+                    "UNKNOWN_PREPARED_OPERATION",
+                    f"Ukendt prepared operation: {item.operation}",
+                    400,
+                )
+        except Exception as err:
+            await self.prepared.finish(prepare_id, consume=True)
+            await self.audit.append(
+                {
+                    "operation": item.operation,
+                    "user_id": auth.user_id,
+                    "prepare_id": prepare_id,
+                    "result": f"failed_{_failure_outcome(err)}",
+                    "error": type(err).__name__,
+                    "message": str(err),
+                }
+            )
+            raise
+        await self.prepared.finish(prepare_id, consume=True)
+        result["outcome"] = _success_outcome(result, item.operation)
+        return result
