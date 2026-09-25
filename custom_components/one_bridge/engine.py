@@ -93,6 +93,7 @@ DISPATCH_OPERATION_HANDLERS = frozenset(
         "ha.apps.list",
         "ha.backups.list",
         "ha.updates.list",
+        "ha.hacs.repository.get",
         "files.list",
         "files.read",
         "files.search",
@@ -108,6 +109,7 @@ DISPATCH_OPERATION_HANDLERS = frozenset(
         "esphome.device.status",
         "esphome.logs.get",
         "change.prepare.registry",
+        "change.prepare.hacs_repository_remove",
         "change.prepare.dashboard",
         "change.prepare.config_entry",
         "change.prepare.supervisor",
@@ -489,6 +491,8 @@ class SuiteBridgeEngine:
             result = await backups_list(self.hass, auth.refresh_token_id, arguments)
         elif operation == "ha.updates.list":
             result = await updates_list(self.hass, auth.refresh_token_id, arguments)
+        elif operation == "ha.hacs.repository.get":
+            _, _, result = self._hacs_repository_snapshot(arguments["repository"])
         elif operation == "files.list":
             result = await self.hass.async_add_executor_job(list_files, self.hass, arguments)
         elif operation == "files.read":
@@ -523,6 +527,8 @@ class SuiteBridgeEngine:
             result = await self._prepare_sequence(arguments, auth)
         elif operation == "change.prepare.registry":
             result = await self._prepare_registry(arguments, auth)
+        elif operation == "change.prepare.hacs_repository_remove":
+            result = await self._prepare_hacs_repository_remove(arguments, auth)
         elif operation == "change.prepare.dashboard":
             result = await self._prepare_dashboard(arguments, auth)
         elif operation == "change.prepare.config_entry":
@@ -683,6 +689,78 @@ class SuiteBridgeEngine:
             )
         material = {"actions": json_safe(actions), "stop_on_error": bool(arguments.get("stop_on_error", True)), "verify_each": False}
         item = await self.prepared.create(user_id=auth.user_id, refresh_token_id=auth.refresh_token_id, operation="sequence.call", normalized_change=material, material=material, risk="high")
+        return self._prepared_response(item)
+
+    def _hacs_repository_snapshot(
+        self, repository_name: str
+    ) -> tuple[Any, Any, dict[str, Any]]:
+        repository_key = str(repository_name).strip().lower()
+        if not repository_key or "/" not in repository_key:
+            raise SuiteBridgeError(
+                "INVALID_HACS_REPOSITORY",
+                "repository skal være angivet som owner/repository.",
+                400,
+            )
+        hacs = self.hass.data.get("hacs")
+        if hacs is None:
+            raise SuiteBridgeError("HACS_NOT_LOADED", "HACS er ikke indlæst.", 409)
+        repositories = getattr(hacs, "repositories", None)
+        getter = getattr(repositories, "get_by_full_name", None)
+        if getter is None:
+            raise SuiteBridgeError("HACS_UNAVAILABLE", "HACS repository-register er ikke tilgængeligt.", 409)
+        repository = getter(repository_key)
+        if repository is None:
+            raise SuiteBridgeError(
+                "HACS_REPOSITORY_NOT_FOUND",
+                f"HACS repository blev ikke fundet: {repository_key}",
+                404,
+            )
+        data = getattr(repository, "data", None)
+        if data is None:
+            raise SuiteBridgeError("HACS_REPOSITORY_INVALID", "HACS repository mangler data.", 409)
+        category = getattr(data, "category", None)
+        snapshot = json_safe(
+            {
+                "repository": str(getattr(data, "full_name", repository_key)),
+                "repository_id": str(getattr(data, "id", "")),
+                "category": getattr(category, "value", category),
+                "installed": bool(getattr(data, "installed", False)),
+                "installed_version": getattr(data, "installed_version", None),
+                "archived": bool(getattr(data, "archived", False)),
+                "disabled": bool(getattr(data, "disabled", False)),
+            }
+        )
+        return hacs, repository, snapshot
+
+    async def _prepare_hacs_repository_remove(
+        self, arguments: dict[str, Any], auth: BridgeAuthContext
+    ) -> dict[str, Any]:
+        _, _, before = self._hacs_repository_snapshot(arguments["repository"])
+        if not before["installed"]:
+            raise SuiteBridgeError(
+                "HACS_REPOSITORY_NOT_INSTALLED",
+                "Repository er allerede afinstalleret i HACS.",
+                409,
+            )
+        material = {
+            "repository": before["repository"],
+            "repository_id": before["repository_id"],
+            "before": before,
+            "before_sha256": digest_json(before),
+        }
+        item = await self.prepared.create(
+            user_id=auth.user_id,
+            refresh_token_id=auth.refresh_token_id,
+            operation="hacs.repository.remove",
+            normalized_change={
+                "repository": before["repository"],
+                "category": before["category"],
+                "installed_version": before["installed_version"],
+                "effect": "uninstall_repository_and_remove_dashboard_resources",
+            },
+            material=material,
+            risk="critical",
+        )
         return self._prepared_response(item)
 
     async def _prepare_registry(self, arguments: dict[str, Any], auth: BridgeAuthContext) -> dict[str, Any]:
@@ -1136,6 +1214,56 @@ class SuiteBridgeEngine:
                     raise SuiteBridgeError("DASHBOARD_CHANGED", "Dashboardet er ændret efter prepare.", 409)
                 await dashboard.async_save(item.material["after"])
                 result = {"executed": True, "sha256": digest_json(item.material["after"])}
+            elif item.operation == "hacs.repository.remove":
+                hacs, repository, current = self._hacs_repository_snapshot(
+                    item.material["repository"]
+                )
+                if current["repository_id"] != item.material["repository_id"]:
+                    raise SuiteBridgeError(
+                        "HACS_REPOSITORY_CHANGED",
+                        "HACS repository-id har ændret sig efter prepare.",
+                        409,
+                    )
+                if digest_json(current) != item.material["before_sha256"]:
+                    raise SuiteBridgeError(
+                        "HACS_REPOSITORY_CHANGED",
+                        "HACS repository har ændret sig efter prepare.",
+                        409,
+                    )
+                refresh_error = None
+                repository.data.new = False
+                try:
+                    await repository.update_repository(ignore_issues=True, force=True)
+                except Exception as err:
+                    refresh_error = type(err).__name__
+                await repository.uninstall()
+                await hacs.data.async_write()
+                installed_after = bool(getattr(repository.data, "installed", False))
+                result = {
+                    "executed": True,
+                    "verified": not installed_after,
+                    "repository": item.material["repository"],
+                    "before": current,
+                    "after": {"installed": installed_after},
+                    "refresh_error": refresh_error,
+                }
+                if installed_after:
+                    raise SuiteBridgeError(
+                        "POST_APPLY_VERIFICATION_FAILED",
+                        "HACS repository blev behandlet, men står stadig som installeret.",
+                        409,
+                        details={"outcome": "applied_unverified", **result},
+                    )
+                await self.audit.append(
+                    {
+                        "operation": item.operation,
+                        "user_id": auth.user_id,
+                        "prepare_id": prepare_id,
+                        "repository": item.material["repository"],
+                        "result": "removed",
+                        "details": json_safe(result),
+                    }
+                )
             elif item.operation == "config_entry.update":
                 from homeassistant.config_entries import ConfigEntryState, ConfigEntryDisabler
                 entry = self.hass.config_entries.async_get_entry(item.material["entry_id"])

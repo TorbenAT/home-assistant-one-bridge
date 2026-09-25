@@ -37,9 +37,13 @@ from .const import (
     OPT_MAIL_SIGNATURE_PHONE,
     OPT_MAIL_SIGNATURE_SENDER,
     OPT_MAIL_SIGNATURE_STANDARD,
+    OPT_MAIL_SENT_FALLBACK,
+    OPT_MAIL_SENT_FOLDERS,
     PRIVATE_CONFIG_RELATIVE,
     ROLE_CAPABILITIES,
 )
+from .mail_ops import detect_sent_folder
+from .models import SuiteBridgeError
 
 
 def _https(value: Any, field: str) -> str:
@@ -167,6 +171,7 @@ def _mail_signature_options(user_input: dict[str, Any]) -> dict[str, str]:
     sender = str(user_input.get(OPT_MAIL_SIGNATURE_SENDER, "") or "").strip()
     standard = str(user_input.get(OPT_MAIL_SIGNATURE_STANDARD, "") or "").strip()
     phone = str(user_input.get(OPT_MAIL_SIGNATURE_PHONE, "") or "").strip()
+    fallback = str(user_input.get(OPT_MAIL_SENT_FALLBACK, "") or "").strip()
     default_profile = str(
         user_input.get(OPT_MAIL_SIGNATURE_DEFAULT, "standard") or "standard"
     ).strip()
@@ -176,6 +181,12 @@ def _mail_signature_options(user_input: dict[str, Any]) -> dict[str, str]:
         or len(sender) > 254
     ):
         raise ValueError("mail_signature_sender")
+    if fallback and (
+        "@" not in fallback
+        or any(char.isspace() for char in fallback)
+        or len(fallback) > 254
+    ):
+        raise ValueError("mail_sent_fallback_address")
     if len(standard) > 4000 or len(phone) > 4000:
         raise ValueError("mail_signature_too_long")
     if default_profile not in MAIL_SIGNATURE_PROFILES:
@@ -191,7 +202,28 @@ def _mail_signature_options(user_input: dict[str, Any]) -> dict[str, str]:
         OPT_MAIL_SIGNATURE_STANDARD: standard,
         OPT_MAIL_SIGNATURE_PHONE: phone,
         OPT_MAIL_SIGNATURE_DEFAULT: default_profile,
+        OPT_MAIL_SENT_FALLBACK: fallback,
     }
+
+
+async def _detect_initial_sent_folders(hass: HomeAssistant) -> dict[str, Any]:
+    """Verify writable Sent folders for already-loaded IMAP accounts during setup."""
+    records: dict[str, Any] = {}
+    for entry in hass.config_entries.async_entries("imap"):
+        try:
+            result = await detect_sent_folder(hass, entry.entry_id)
+        except SuiteBridgeError:
+            # Never guess or fail the entire One Bridge setup. An account that
+            # cannot be verified remains unconfigured and mail prepare will
+            # require explicit autodetection before sending through it.
+            continue
+        records[entry.entry_id] = {
+            "folder": result["folder"],
+            "verified": True,
+            "verified_at": result["verified_at"],
+            "method": result["method"],
+        }
+    return records
 
 
 _ALL_CAPABILITIES = frozenset().union(*ROLE_CAPABILITIES.values())
@@ -342,6 +374,8 @@ class OneBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if role not in {"source", "target"} or not installation_id or not public_base_url:
             return self.async_abort(reason="invalid_saved_configuration")
         effective_preset, _ = resolve_raw_permissions(import_data)
+        sent_folders = await _detect_initial_sent_folders(self.hass)
+        options = {OPT_MAIL_SENT_FOLDERS: sent_folders} if sent_folders else {}
         return self.async_create_entry(
             title=f"One Bridge ({role})",
             data={
@@ -350,6 +384,7 @@ class OneBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "public_base_url": public_base_url,
                 "permission_preset": effective_preset,
             },
+            options=options,
         )
 
     async def async_step_user(self, user_input=None):
@@ -457,6 +492,8 @@ class OneBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if bool(user_input.get("confirm")):
                 path = Path(self.hass.config.path(PRIVATE_CONFIG_RELATIVE))
                 await self.hass.async_add_executor_job(_write, path, dict(self._pending))
+                sent_folders = await _detect_initial_sent_folders(self.hass)
+                options = {OPT_MAIL_SENT_FOLDERS: sent_folders} if sent_folders else {}
                 return self.async_create_entry(
                     title=f"One Bridge ({self._pending['role']})",
                     data={
@@ -466,6 +503,7 @@ class OneBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "callback_url": (self._pending.get("allowed_redirect_uris") or [""])[0],
                         "permission_preset": self._pending["permission_preset"],
                     },
+                    options=options,
                 )
             errors["base"] = "secret_not_confirmed"
         return self.async_show_form(
@@ -572,6 +610,10 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                     OPT_MAIL_SIGNATURE_DEFAULT,
                     default=str(entry_options.get(OPT_MAIL_SIGNATURE_DEFAULT, "standard") or "standard"),
                 ): _mail_signature_profile_selector(),
+                vol.Optional(
+                    OPT_MAIL_SENT_FALLBACK,
+                    default=str(entry_options.get(OPT_MAIL_SENT_FALLBACK, "") or ""),
+                ): str,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

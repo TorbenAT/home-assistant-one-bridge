@@ -5,7 +5,7 @@ from __future__ import annotations
 DOMAIN = "one_bridge"
 API_VERSION = 1
 PROTOCOL_VERSION = 2
-BOOTSTRAP_VERSION = "0.9.10"
+BOOTSTRAP_VERSION = "0.9.11"
 CATALOG_VERSION = 2
 
 PRIVATE_CONFIG_RELATIVE = "one-bridge/private/bridge-v1.json"
@@ -18,6 +18,8 @@ OPT_MAIL_SIGNATURE_SENDER = "mail_signature_sender"
 OPT_MAIL_SIGNATURE_STANDARD = "mail_signature_standard"
 OPT_MAIL_SIGNATURE_PHONE = "mail_signature_phone"
 OPT_MAIL_SIGNATURE_DEFAULT = "mail_signature_default_profile"
+OPT_MAIL_SENT_FALLBACK = "mail_sent_fallback_address"
+OPT_MAIL_SENT_FOLDERS = "mail_sent_folders"
 MAIL_SIGNATURE_PROFILES = ("standard", "phone", "none")
 
 PREPARE_TTL_SECONDS = 300

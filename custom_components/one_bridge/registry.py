@@ -34,7 +34,7 @@ def _entry_dict(entry: Any) -> dict[str, Any]:
 
 
 class RegistryManager:
-    ENTITY_UPDATE_FIELDS = frozenset({"name", "icon", "area_id", "labels"})
+    ENTITY_UPDATE_FIELDS = frozenset({"name", "icon", "area_id", "labels", "disabled_by"})
     DEVICE_UPDATE_FIELDS = frozenset({"name_by_user", "area_id", "labels"})
 
     def __init__(
@@ -141,14 +141,15 @@ class RegistryManager:
         kind = str(payload.get("kind", "")).strip().lower()
         object_id = str(payload.get("object_id", "")).strip()
         changes = payload.get("changes")
-        expected = str(payload.get("expected_sha256", "")).lower()
+        expected_raw = payload.get("expected_sha256")
+        expected = str(expected_raw).lower() if expected_raw else None
         if kind not in {"entity", "device"} or not object_id or not isinstance(changes, dict):
             raise SuiteBridgeError(
                 "INVALID_REGISTRY_CHANGE",
                 "kind (entity/device), object_id og changes er obligatoriske.",
             )
-        if len(expected) != 64:
-            raise SuiteBridgeError("EXPECTED_SHA256_REQUIRED", "expected_sha256 er obligatorisk.", 409)
+        if expected is not None and len(expected) != 64:
+            raise SuiteBridgeError("EXPECTED_SHA256_INVALID", "expected_sha256 skal være 64 hex-tegn.", 409)
         allowed = self.ENTITY_UPDATE_FIELDS if kind == "entity" else self.DEVICE_UPDATE_FIELDS
         unknown = set(changes) - allowed
         if unknown:
@@ -163,6 +164,15 @@ class RegistryManager:
         for text_field in ("name", "icon", "name_by_user", "area_id"):
             if text_field in normalized and normalized[text_field] is not None:
                 normalized[text_field] = str(normalized[text_field]).strip() or None
+        if "disabled_by" in normalized:
+            value = normalized["disabled_by"]
+            if value is not None and str(value) != "user":
+                raise SuiteBridgeError(
+                    "INVALID_DISABLED_BY",
+                    "disabled_by må kun være 'user' eller null.",
+                    422,
+                )
+            normalized["disabled_by"] = None if value is None else "user"
         self._validate_area_and_labels(normalized)
 
         if kind == "entity":
@@ -173,7 +183,7 @@ class RegistryManager:
             raise SuiteBridgeError("REGISTRY_OBJECT_NOT_FOUND", "Registry-objektet findes ikke.", 404)
         before = _entry_dict(entry)
         before_sha = digest_json(before)
-        if before_sha != expected:
+        if expected is not None and before_sha != expected:
             raise SuiteBridgeError("REGISTRY_OBJECT_CHANGED", "Registry-objektets SHA-256 matcher ikke.", 409)
         after = deepcopy(before)
         after.update(normalized)
@@ -238,6 +248,10 @@ class RegistryManager:
         kwargs = dict(changes)
         if "labels" in kwargs:
             kwargs["labels"] = set(kwargs["labels"])
+        if kind == "entity" and "disabled_by" in kwargs:
+            kwargs["disabled_by"] = (
+                None if kwargs["disabled_by"] is None else er.RegistryEntryDisabler.USER
+            )
         if kind == "entity":
             updated = registry.async_update_entity(object_id, **kwargs)
         else:

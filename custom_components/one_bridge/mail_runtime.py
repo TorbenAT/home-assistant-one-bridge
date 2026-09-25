@@ -13,26 +13,35 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from .const import DOMAIN
+from .const import DOMAIN, OPT_MAIL_SENT_FALLBACK, OPT_MAIL_SENT_FOLDERS
 from .dispatch import OperationCatalog, validate_dispatch_envelope
 from .mail_ops import (
     apply_mail_send,
+    configured_sent_folder_record,
+    detect_sent_folder,
     mail_accounts,
     mail_folders,
     mail_get,
     mail_search,
+    mail_sent_folder_status,
+    normalize_sent_fallback_address,
     prepare_mail_send,
+    sent_folder_records,
 )
 from .models import SuiteBridgeError, enforce_capability_policy, json_safe
 
 _MAIL_SERVICE = "mail_send_prepared"
+_MAIL_SENT_FOLDER_SERVICE = "mail_sent_folder_detect_prepared"
 _MAIL_OPERATIONS = frozenset(
     {
         "mail.accounts",
         "mail.folders",
         "mail.search",
         "mail.get",
+        "mail.sent_folder_status",
         "change.prepare.mail_send",
+        "change.prepare.mail_settings",
+        "change.prepare.mail_sent_folder_detect",
     }
 )
 
@@ -74,6 +83,8 @@ def activate_mail_feature(hass: Any, catalog: OperationCatalog, engine: Any) -> 
 
     if not hass.services.has_service(DOMAIN, _MAIL_SERVICE):
         _register_internal_send_service(engine)
+    if not hass.services.has_service(DOMAIN, _MAIL_SENT_FOLDER_SERVICE):
+        _register_internal_sent_folder_service(engine)
 
 
 def _patch_engine_class(engine_cls: type[Any], engine_module: Any) -> None:
@@ -85,7 +96,7 @@ def _patch_engine_class(engine_cls: type[Any], engine_module: Any) -> None:
         if (
             operation == "service.call"
             and result.get("domain") == DOMAIN
-            and result.get("service") == _MAIL_SERVICE
+            and result.get("service") in {_MAIL_SERVICE, _MAIL_SENT_FOLDER_SERVICE}
         ):
             return engine_module.OUTCOME_APPLIED_VERIFIED
         return original_success_outcome(result, operation)
@@ -118,8 +129,14 @@ def _patch_engine_class(engine_cls: type[Any], engine_module: Any) -> None:
             result = await mail_search(self.hass, arguments)
         elif operation == "mail.get":
             result = await mail_get(self.hass, arguments)
+        elif operation == "mail.sent_folder_status":
+            result = await mail_sent_folder_status(self.hass, arguments)
         elif operation == "change.prepare.mail_send":
             result = await _prepare_mail_send(self, arguments, auth, envelope)
+        elif operation == "change.prepare.mail_settings":
+            result = await _prepare_mail_settings(self, arguments, auth, envelope)
+        elif operation == "change.prepare.mail_sent_folder_detect":
+            result = await _prepare_mail_sent_folder_detect(self, arguments, auth, envelope)
         else:
             raise RuntimeError(f"Mail handler registry drift: {operation}")
 
@@ -196,6 +213,212 @@ async def _prepare_mail_send(
     return engine._prepared_response(item)
 
 
+async def _prepare_mail_settings(
+    engine: Any,
+    arguments: dict[str, Any],
+    auth: Any,
+    envelope: dict[str, Any],
+) -> dict[str, Any]:
+    entries = engine.hass.config_entries.async_entries(DOMAIN)
+    if len(entries) != 1:
+        raise SuiteBridgeError(
+            "MAIL_SETTINGS_CONFIG_MISSING",
+            "One Bridge mailindstillinger kræver præcis én aktiv One Bridge config entry.",
+            409,
+        )
+    entry = entries[0]
+    fallback = normalize_sent_fallback_address(arguments.get("sent_fallback_address"))
+    before_options = dict(getattr(entry, "options", {}) or {})
+    before_fallback = str(before_options.get(OPT_MAIL_SENT_FALLBACK) or "").strip() or None
+    after_options = dict(before_options)
+    if fallback is None:
+        after_options.pop(OPT_MAIL_SENT_FALLBACK, None)
+    else:
+        after_options[OPT_MAIL_SENT_FALLBACK] = fallback
+    normalized = {
+        "entry_id": entry.entry_id,
+        "sent_fallback_address_before": before_fallback,
+        "sent_fallback_address_after": fallback,
+        "preserved_option_keys": sorted(key for key in before_options if key != OPT_MAIL_SENT_FALLBACK),
+    }
+    material = {
+        "entry_id": entry.entry_id,
+        "action": "options",
+        "options": after_options,
+        "before_state": entry.state.value,
+        "before_options": before_options,
+    }
+    item = await engine.prepared.create(
+        user_id=auth.user_id,
+        refresh_token_id=auth.refresh_token_id,
+        operation="config_entry.update",
+        normalized_change=normalized,
+        material=material,
+        risk="high",
+    )
+    await engine.audit.append(
+        {
+            **auth.audit_metadata(
+                capability="mail:write",
+                operation="change.prepare.mail_settings",
+                request_id=envelope.get("request_id"),
+            ),
+            "prepare_id": item.prepare_id,
+            "result": "prepared",
+            "sent_fallback_address_before": before_fallback,
+            "sent_fallback_address_after": fallback,
+        }
+    )
+    return engine._prepared_response(item)
+
+
+async def _prepare_mail_sent_folder_detect(
+    engine: Any,
+    arguments: dict[str, Any],
+    auth: Any,
+    envelope: dict[str, Any],
+) -> dict[str, Any]:
+    entries = engine.hass.config_entries.async_entries(DOMAIN)
+    if len(entries) != 1:
+        raise SuiteBridgeError(
+            "MAIL_SETTINGS_CONFIG_MISSING",
+            "Sent-folder autodetektion kræver præcis én aktiv One Bridge config entry.",
+            409,
+        )
+    bridge_entry = entries[0]
+    imap_entry_id = str(arguments["imap_entry_id"])
+    status = await mail_sent_folder_status(engine.hass, {"imap_entry_id": imap_entry_id})
+    before_records = sent_folder_records(engine.hass)
+    normalized = {
+        "bridge_entry_id": bridge_entry.entry_id,
+        "imap_entry_id": imap_entry_id,
+        "configured_before": status.get("configured"),
+        "candidates": status.get("candidates", []),
+        "probe": "IMAP APPEND + read-back only; no SMTP send",
+    }
+    service_material = {
+        "domain": DOMAIN,
+        "service": _MAIL_SENT_FOLDER_SERVICE,
+        "target": {},
+        "data": {"imap_entry_id": imap_entry_id},
+        "expected": {"entity_ids": [], "not_states": []},
+        "verify": False,
+        "_mail_sent_folder": {
+            "bridge_entry_id": bridge_entry.entry_id,
+            "imap_entry_id": imap_entry_id,
+            "before_records": before_records,
+        },
+    }
+    item = await engine.prepared.create(
+        user_id=auth.user_id,
+        refresh_token_id=auth.refresh_token_id,
+        operation="service.call",
+        normalized_change=normalized,
+        material=service_material,
+        risk="high",
+    )
+    service_material["data"]["prepare_id"] = item.prepare_id
+    await engine.audit.append(
+        {
+            **auth.audit_metadata(
+                capability="mail:write",
+                operation="change.prepare.mail_sent_folder_detect",
+                request_id=envelope.get("request_id"),
+            ),
+            "prepare_id": item.prepare_id,
+            "result": "prepared",
+            "imap_entry_id": imap_entry_id,
+            "candidates": status.get("candidates", []),
+        }
+    )
+    return engine._prepared_response(item)
+
+
+def _register_internal_sent_folder_service(engine: Any) -> None:
+    async def async_detect_sent_folder(call: Any) -> None:
+        prepare_id = str(call.data.get("prepare_id") or "").strip()
+        imap_entry_id = str(call.data.get("imap_entry_id") or "").strip()
+        item = engine.prepared._items.get(prepare_id)
+        if (
+            item is None
+            or not item.in_flight
+            or item.operation != "service.call"
+            or item.material.get("domain") != DOMAIN
+            or item.material.get("service") != _MAIL_SENT_FOLDER_SERVICE
+        ):
+            raise SuiteBridgeError(
+                "MAIL_SENT_FOLDER_PREPARE_NOT_ACTIVE",
+                "Sent-folder autodetektion kræver et aktivt, server-genereret change.apply.",
+                409,
+            )
+        material = item.material.get("_mail_sent_folder")
+        if not isinstance(material, dict) or str(material.get("imap_entry_id") or "") != imap_entry_id:
+            raise SuiteBridgeError(
+                "MAIL_SENT_FOLDER_PREPARE_INVALID",
+                "Den preparerede Sent-folder autodetektion er ugyldig.",
+                409,
+            )
+        before_records = dict(material.get("before_records") or {})
+        if sent_folder_records(engine.hass) != before_records:
+            raise SuiteBridgeError(
+                "MAIL_SENT_FOLDER_CONFIG_CHANGED",
+                "Sent-folder konfigurationen blev ændret efter prepare; lav et nyt prepare.",
+                409,
+                details={"outcome": "not_applied"},
+            )
+
+        detection = await detect_sent_folder(engine.hass, imap_entry_id)
+        bridge_entry = engine.hass.config_entries.async_get_entry(str(material["bridge_entry_id"]))
+        if bridge_entry is None or bridge_entry.domain != DOMAIN:
+            raise SuiteBridgeError(
+                "MAIL_SETTINGS_CONFIG_MISSING",
+                "One Bridge config entry findes ikke længere.",
+                409,
+            )
+        if sent_folder_records(engine.hass) != before_records:
+            raise SuiteBridgeError(
+                "MAIL_SENT_FOLDER_CONFIG_CHANGED",
+                "Sent-folder konfigurationen blev ændret under autodetektionen; resultatet blev ikke gemt.",
+                409,
+                details={"outcome": "not_applied"},
+            )
+        record = {
+            "folder": detection["folder"],
+            "verified": True,
+            "verified_at": detection["verified_at"],
+            "method": detection["method"],
+        }
+        updated_records = dict(before_records)
+        updated_records[imap_entry_id] = record
+        options = dict(getattr(bridge_entry, "options", {}) or {})
+        options[OPT_MAIL_SENT_FOLDERS] = updated_records
+        engine.hass.config_entries.async_update_entry(bridge_entry, options=options)
+        configured = configured_sent_folder_record(engine.hass, imap_entry_id)
+        verified = bool(configured and configured == record)
+        result = {
+            "executed": True,
+            "status": "sent_folder_verified" if verified else "sent_folder_not_saved",
+            "imap_entry_id": imap_entry_id,
+            "configured": configured,
+            "attempts": detection.get("attempts", []),
+            "verified": verified,
+        }
+        engine._mail_apply_results[prepare_id] = result
+        while len(engine._mail_apply_results) > 200:
+            engine._mail_apply_results.pop(next(iter(engine._mail_apply_results)))
+        if not verified:
+            raise SuiteBridgeError(
+                "MAIL_SENT_FOLDER_SAVE_FAILED",
+                "Sent-mappen blev verificeret via IMAP, men konfigurationen kunne ikke efterverificeres.",
+                409,
+                details={"outcome": "applied_unverified", "verification": json_safe(result)},
+            )
+
+    engine.hass.services.async_register(
+        DOMAIN, _MAIL_SENT_FOLDER_SERVICE, async_detect_sent_folder
+    )
+
+
 def _register_internal_send_service(engine: Any) -> None:
     async def async_mail_send(call: Any) -> None:
         prepare_id = str(call.data.get("prepare_id") or "").strip()
@@ -234,7 +457,7 @@ def _register_internal_send_service(engine: Any) -> None:
         if not result.get("verified"):
             raise SuiteBridgeError(
                 "MAIL_SEND_INCOMPLETE",
-                "Mailen blev helt eller delvist sendt, men afsendelsen kunne ikke verificeres som sent_and_saved.",
+                "Mailen blev helt eller delvist sendt, men afsendelsen kunne ikke verificeres med en arkivkopi.",
                 409,
                 details={
                     "outcome": "applied_unverified",

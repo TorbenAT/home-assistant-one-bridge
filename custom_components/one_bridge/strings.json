@@ -67,7 +67,8 @@
           "mail_signature_sender": "Mail signature sender address",
           "mail_signature_standard": "Standard mail signature",
           "mail_signature_phone": "Mail signature with phone number",
-          "mail_signature_default_profile": "Default mail signature profile"
+          "mail_signature_default_profile": "Default mail signature profile",
+          "mail_sent_fallback_address": "Sent-copy fallback address"
         },
         "data_description": {
           "callback_url": "Paste the callback URL shown by the GPT Action editor. A callback-only change is saved directly when you submit this screen. Leave blank until the editor provides one.",
@@ -81,7 +82,8 @@
           "mail_signature_sender": "Only mail sent from this exact SMTP sender gets an automatic signature.",
           "mail_signature_standard": "Multiline signature used for normal messages.",
           "mail_signature_phone": "Multiline signature used when the recipient should also get your phone number.",
-          "mail_signature_default_profile": "Used automatically when a mail prepare does not explicitly choose another profile."
+          "mail_signature_default_profile": "Used automatically when a mail prepare does not explicitly choose another profile.",
+          "mail_sent_fallback_address": "If IMAP cannot save the sent message, One Bridge sends the exact prepared RFC822 bytes to this address as a last-resort archive copy. Leave blank to disable."
         }
       },
       "capabilities": {

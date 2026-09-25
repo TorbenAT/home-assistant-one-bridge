@@ -1,5 +1,5 @@
 {
-  "schema_version": "2.3.0-mail.1",
+  "schema_version": "2.3.0-mail.2",
   "catalog_version": 1,
   "operations": [
     {
@@ -60,7 +60,39 @@
         "disconnect_expected": false,
         "idempotent": true,
         "recovery_operations": [],
-        "verification_hint": "Prefer the folder carrying the IMAP \\Sent flag when selecting a sent_folder."
+        "verification_hint": "Do not infer write safety from \\Sent alone. Use mail.sent_folder_status and change.prepare.mail_sent_folder_detect; mail sending uses only the stored verified folder."
+      }
+    },
+    {
+      "name": "mail.sent_folder_status",
+      "mode": "read",
+      "risk": 0,
+      "description": "Read the configured verified Sent write-folder and ordered autodetection candidates for one IMAP account",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "imap_entry_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          }
+        },
+        "required": ["imap_entry_id"],
+        "additionalProperties": false
+      },
+      "category": "mail",
+      "capability": "mail:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin",
+      "operator": {
+        "example": {"imap_entry_id": "imap-entry"},
+        "result_format": "Configured record, existence/verification state and ordered candidate folders.",
+        "side_effects": "Read-only LIST and config inspection; no APPEND and no SMTP.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "needs_detection=true means run change.prepare.mail_sent_folder_detect before preparing outbound mail."
       }
     },
     {
@@ -229,11 +261,6 @@
           "signature_profile": {
             "type": "string",
             "enum": ["standard", "phone", "none"]
-          },
-          "sent_folder": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 255
           }
         },
         "required": [
@@ -260,14 +287,83 @@
           "subject": "Test",
           "text": "This is a test message."
         },
-        "result_format": "Prepared mail review containing exact From, To, Cc, Subject, full text after One Bridge config-entry signature selection, signature profile, Sent folder, Message-ID and MIME SHA-256.",
-        "side_effects": "Creates only a short-lived prepared mutation. No SMTP send or IMAP write occurs until change.apply. This operation replaces any legacy SMTP/notify-service mail path.",
+        "result_format": "Prepared mail review containing exact From, To, Cc, Subject, full text after signature selection, the stored verified Sent write-folder and its verification metadata, Message-ID and MIME SHA-256.",
+        "side_effects": "Creates only a short-lived prepared mutation. No SMTP send or IMAP write occurs until change.apply. The Sent write-folder cannot be overridden per message and must already be verified for the selected IMAP account.",
         "disconnect_expected": false,
         "idempotent": false,
         "recovery_operations": [
           "system.prepare.status"
         ],
-        "verification_hint": "Review every recipient, subject and the complete body before apply. If the current user request explicitly says to send the exact prepared email, continue to change.apply in the same turn rather than asking for a second conversational confirmation. Successful apply must report sent_and_saved. From is forced by the selected SMTP config entry; BCC is not supported."
+        "verification_hint": "If prepare returns MAIL_SENT_FOLDER_NOT_CONFIGURED, run change.prepare.mail_sent_folder_detect for that IMAP account first. Otherwise review recipients/body and apply. Successful apply reports sent_and_saved after IMAP archival or sent_and_archived_fallback after the configured last-resort SMTP archive copy."
+      }
+    },
+    {
+      "name": "change.prepare.mail_settings",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Prepare a narrow One Bridge mail-settings change that only sets or clears the last-resort Sent fallback address while preserving all other config-entry options",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "sent_fallback_address": {
+            "type": "string",
+            "maxLength": 254
+          }
+        },
+        "required": [
+          "sent_fallback_address"
+        ],
+        "additionalProperties": false
+      },
+      "category": "mail",
+      "capability": "mail:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "sent_fallback_address": "archive@example.com"
+        },
+        "result_format": "Prepared review with the fallback address before/after and only the names of preserved option keys; signature contents are not exposed.",
+        "side_effects": "Prepare only. Apply updates the One Bridge config-entry options by merging this single mail setting into the existing options. An empty address disables the fallback.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status"
+        ],
+        "verification_hint": "Verify after apply that the One Bridge config entry still contains its previous option keys and that a subsequent mail prepare binds the configured sent_fallback_address."
+      }
+    },
+    {
+      "name": "change.prepare.mail_sent_folder_detect",
+      "mode": "prepare",
+      "risk": 2,
+      "description": "Prepare active autodetection of the writable Sent folder for one IMAP account using IMAP APPEND plus read-back verification and no SMTP send",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "imap_entry_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          }
+        },
+        "required": ["imap_entry_id"],
+        "additionalProperties": false
+      },
+      "category": "mail",
+      "capability": "mail:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin",
+      "operator": {
+        "example": {"imap_entry_id": "imap-entry"},
+        "result_format": "Prepared candidate list and current per-account Sent configuration. Apply probes candidates in safe order and stores the first verified write-folder.",
+        "side_effects": "Prepare is read-only. Apply creates one local verification message in the first candidate that passes APPEND/read-back and stores a verified per-IMAP-account Sent-folder record in One Bridge options. No SMTP is used.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": ["mail.sent_folder_status", "system.apply.status"],
+        "verification_hint": "After apply, mail.sent_folder_status must report verified=true, configured_exists=true and needs_detection=false for the same imap_entry_id."
       }
     }
   ]

@@ -1,5 +1,5 @@
 {
-  "schema_version": "2.3.0",
+  "schema_version": "2.3.1",
   "catalog_version": 2,
   "public_routes": {
     "dispatch": {
@@ -1394,6 +1394,43 @@
       }
     },
     {
+      "name": "ha.hacs.repository.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Hent status for ét HACS repository",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "repository": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+          }
+        },
+        "required": [
+          "repository"
+        ],
+        "additionalProperties": false
+      },
+      "category": "home_assistant",
+      "capability": "control:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "repository": "ulic75/power-flow-card"
+        },
+        "result_format": "HACS repository-id, kategori, installeret version og arkiveret/installeret status.",
+        "side_effects": "Ingen.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Brug samme repository i change.prepare.hacs_repository_remove, hvis det skal fjernes."
+      }
+    },
+    {
       "name": "files.list",
       "mode": "read",
       "risk": 0,
@@ -1917,6 +1954,46 @@
           "system.prepare.status"
         ],
         "verification_hint": "FILE_PATCH_MISMATCH/AMBIGUOUS: laes regionen igen og preparer forfra."
+      }
+    },
+    {
+      "name": "change.prepare.hacs_repository_remove",
+      "mode": "prepare",
+      "risk": 3,
+      "description": "Forbered fjernelse af et installeret HACS repository via HACS' egen uninstall-mekanisme",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "repository": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+          }
+        },
+        "required": [
+          "repository"
+        ],
+        "additionalProperties": false
+      },
+      "category": "change",
+      "capability": "control:write",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin",
+      "operator": {
+        "example": {
+          "repository": "ulic75/power-flow-card"
+        },
+        "result_format": "Staget HACS-fjernelse med repository, kategori og installeret version.",
+        "side_effects": "Prepare ændrer intet. Apply afinstallerer repository-filer og fjerner tilhørende dashboard-resource via HACS.",
+        "disconnect_expected": false,
+        "idempotent": false,
+        "recovery_operations": [
+          "system.prepare.status",
+          "ha.hacs.repository.get"
+        ],
+        "verification_hint": "Efter apply skal ha.hacs.repository.get vise installed=false."
       }
     },
     {

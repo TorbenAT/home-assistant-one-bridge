@@ -28,6 +28,8 @@ from .const import (
     OPT_MAIL_SIGNATURE_PHONE,
     OPT_MAIL_SIGNATURE_SENDER,
     OPT_MAIL_SIGNATURE_STANDARD,
+    OPT_MAIL_SENT_FALLBACK,
+    OPT_MAIL_SENT_FOLDERS,
 )
 from .models import SuiteBridgeError
 
@@ -114,6 +116,30 @@ def _imap_folder(entry: Any) -> str:
     return str(options.get("folder") or data.get("folder") or "INBOX")
 
 
+def sent_folder_records(hass: Any) -> dict[str, Any]:
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not entries:
+        return {}
+    options = dict(getattr(entries[0], "options", {}) or {})
+    raw = options.get(OPT_MAIL_SENT_FOLDERS, {})
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def configured_sent_folder_record(hass: Any, imap_entry_id: str) -> dict[str, Any] | None:
+    record = sent_folder_records(hass).get(str(imap_entry_id))
+    if not isinstance(record, dict):
+        return None
+    folder = str(record.get("folder") or "").strip()
+    if not folder:
+        return None
+    return {
+        "folder": folder,
+        "verified": bool(record.get("verified", False)),
+        "verified_at": str(record.get("verified_at") or "") or None,
+        "method": str(record.get("method") or "") or None,
+    }
+
+
 def mail_accounts(hass: Any) -> dict[str, Any]:
     """Return non-secret IMAP/SMTP config-entry metadata."""
 
@@ -135,6 +161,7 @@ def mail_accounts(hass: Any) -> dict[str, Any]:
     imap_entries = []
     for entry in hass.config_entries.async_entries("imap"):
         data = dict(getattr(entry, "data", {}) or {})
+        sent_record = configured_sent_folder_record(hass, entry.entry_id)
         imap_entries.append(
             {
                 "entry_id": entry.entry_id,
@@ -145,6 +172,7 @@ def mail_accounts(hass: Any) -> dict[str, Any]:
                 "port": data.get("port", 993),
                 "folder": _imap_folder(entry),
                 "verify_ssl": bool(data.get("verify_ssl", True)),
+                "sent_folder": sent_record,
             }
         )
     return {
@@ -234,6 +262,39 @@ def _list_folders_sync(entry: Any) -> list[dict[str, Any]]:
             pass
 
 
+def _sent_folder_candidates(folders: list[dict[str, Any]]) -> list[str]:
+    names = {str(item["name"]).casefold(): str(item["name"]) for item in folders}
+    flagged = {
+        str(item["name"]).casefold()
+        for item in folders
+        if "\\sent" in {str(flag).casefold() for flag in item.get("flags", [])}
+    }
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str | None) -> None:
+        if not name:
+            return
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(name)
+
+    # Exact RFC-style Sent is preferred because some servers advertise several
+    # aliases with \\Sent even though only the canonical name accepts APPEND.
+    add(names.get("sent"))
+    for candidate in _SENT_NAMES:
+        if candidate in flagged:
+            add(names.get(candidate))
+    for item in folders:
+        name = str(item["name"])
+        if name.casefold() in flagged:
+            add(name)
+    for candidate in _SENT_NAMES:
+        add(names.get(candidate))
+    return ordered
+
+
 async def mail_folders(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     entry = _entry(hass, arguments["imap_entry_id"], "imap")
     folders = await hass.async_add_executor_job(_list_folders_sync, entry)
@@ -241,7 +302,26 @@ async def mail_folders(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         "imap_entry_id": entry.entry_id,
         "folders": folders,
         "count": len(folders),
+        "sent_candidates": _sent_folder_candidates(folders),
+        "configured_sent_folder": configured_sent_folder_record(hass, entry.entry_id),
         "security_notice": _UNTRUSTED_NOTICE,
+    }
+
+
+async def mail_sent_folder_status(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    entry = _entry(hass, arguments["imap_entry_id"], "imap")
+    folders = await hass.async_add_executor_job(_list_folders_sync, entry)
+    configured = configured_sent_folder_record(hass, entry.entry_id)
+    names = {str(item["name"]).casefold() for item in folders}
+    configured_exists = bool(
+        configured and str(configured["folder"]).casefold() in names
+    )
+    return {
+        "imap_entry_id": entry.entry_id,
+        "configured": configured,
+        "configured_exists": configured_exists,
+        "needs_detection": not bool(configured and configured.get("verified") and configured_exists),
+        "candidates": _sent_folder_candidates(folders),
     }
 
 
@@ -500,30 +580,118 @@ def _smtp_sender(entry: Any) -> tuple[str, str | None]:
     return sender, sender_name
 
 
-def _resolve_sent_folder_sync(entry: Any, requested: str | None) -> str:
+def _resolve_sent_folder_sync(entry: Any, configured: str) -> str:
     folders = _list_folders_sync(entry)
     names = {str(item["name"]).casefold(): str(item["name"]) for item in folders}
-    if requested:
-        selected = names.get(requested.casefold())
-        if selected is None:
-            raise SuiteBridgeError(
-                "MAIL_SENT_FOLDER_NOT_FOUND",
-                "Den angivne Sent-mappe findes ikke på IMAP-kontoen.",
-                404,
-            )
-        return selected
-    for item in folders:
-        flags = {str(flag).casefold() for flag in item.get("flags", [])}
-        if "\\sent" in flags:
-            return str(item["name"])
-    for candidate in _SENT_NAMES:
-        if candidate in names:
-            return names[candidate]
-    raise SuiteBridgeError(
-        "MAIL_SENT_FOLDER_NOT_FOUND",
-        "Ingen IMAP-mappe markeret som Sent blev fundet; angiv sent_folder eksplicit.",
-        409,
+    selected = names.get(str(configured).casefold())
+    if selected is None:
+        raise SuiteBridgeError(
+            "MAIL_SENT_FOLDER_NOT_FOUND",
+            "Den verificerede Sent-mappe findes ikke længere på IMAP-kontoen; kør autodetektion igen.",
+            409,
+        )
+    return selected
+
+
+def _probe_message(folder: str) -> tuple[bytes, str, str]:
+    message = EmailMessage(policy=policy.SMTP)
+    message_id = make_msgid(domain="one-bridge.local")
+    marker = hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:16]
+    message["From"] = "one-bridge@localhost"
+    message["To"] = "one-bridge@localhost"
+    message["Subject"] = f"One Bridge Sent-folder verification {marker}"
+    message["Date"] = format_datetime(datetime.now(timezone.utc))
+    message["Message-ID"] = message_id
+    message.set_content(
+        f"One Bridge IMAP APPEND/read-back verification for folder: {folder}\n"
+        "This message was created locally in Sent and was not sent via SMTP.",
+        charset="utf-8",
     )
+    return message.as_bytes(policy=policy.SMTP), message_id, marker
+
+
+def _probe_sent_candidate_sync(entry: Any, folder: str) -> dict[str, Any]:
+    raw, message_id, marker = _probe_message(folder)
+    append_ok = False
+    append_error: dict[str, Any] | None = None
+    client = None
+    try:
+        client = _imap_connect(entry)
+        status, response = client.append(folder, "\\Seen", None, raw)
+        append_ok = status == "OK"
+        if not append_ok:
+            append_error = {
+                "type": "imap_status",
+                "status": str(status),
+                "response": " ".join(
+                    item.decode("utf-8", "replace") if isinstance(item, bytes) else str(item)
+                    for item in (response or [])
+                )[:500],
+            }
+    except (imaplib.IMAP4.error, OSError, TimeoutError, ssl.SSLError) as err:
+        append_error = {
+            "type": type(err).__name__,
+            "reason": " ".join(str(err).split())[:500],
+        }
+    finally:
+        if client is not None:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    readback_error: dict[str, Any] | None = None
+    found = False
+    try:
+        results = _search_sync(entry, folder, marker, False, 10, 100)
+        found = any(str(item.get("message_id") or "") == message_id for item in results)
+    except SuiteBridgeError as err:
+        readback_error = {"code": err.code, "message": err.message}
+
+    return {
+        "folder": folder,
+        "append_ok": append_ok,
+        "readback_found": found,
+        "verified": bool(append_ok and found),
+        "stored_despite_append_error": bool(found and not append_ok),
+        "append_error": append_error,
+        "readback_error": readback_error,
+        "message_id": message_id,
+    }
+
+
+def detect_sent_folder_sync(entry: Any) -> dict[str, Any]:
+    folders = _list_folders_sync(entry)
+    candidates = _sent_folder_candidates(folders)
+    if not candidates:
+        raise SuiteBridgeError(
+            "MAIL_SENT_FOLDER_NO_CANDIDATES",
+            "IMAP-kontoen har ingen sandsynlig Sent-mappe at verificere.",
+            409,
+        )
+    attempts: list[dict[str, Any]] = []
+    for folder in candidates:
+        result = _probe_sent_candidate_sync(entry, folder)
+        attempts.append(result)
+        if result["verified"]:
+            return {
+                "folder": folder,
+                "verified": True,
+                "method": "imap_append_readback",
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+                "attempts": attempts,
+            }
+    raise SuiteBridgeError(
+        "MAIL_SENT_FOLDER_DETECTION_FAILED",
+        "Ingen Sent-kandidat bestod både IMAP APPEND og read-back verifikation.",
+        409,
+        details={"attempts": attempts},
+    )
+
+
+async def detect_sent_folder(hass: Any, imap_entry_id: str) -> dict[str, Any]:
+    entry = _entry(hass, imap_entry_id, "imap")
+    return await hass.async_add_executor_job(detect_sent_folder_sync, entry)
 
 
 def _signature_for_sender(
@@ -591,12 +759,35 @@ def _signature_for_sender(
     return profile, signature
 
 
+def normalize_sent_fallback_address(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return _validate_address(raw)
+    except SuiteBridgeError as err:
+        raise SuiteBridgeError(
+            "MAIL_SENT_FALLBACK_INVALID",
+            "One Bridge har en ugyldig fallback-adresse til Sendt-kopier.",
+            422,
+        ) from err
+
+
+def _sent_fallback_address(hass: Any) -> str | None:
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not entries:
+        return None
+    options = dict(getattr(entries[0], "options", {}) or {})
+    return normalize_sent_fallback_address(options.get(OPT_MAIL_SENT_FALLBACK))
+
+
 async def prepare_mail_send(hass: Any, arguments: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build one exact RFC822 message and a reviewable normalized change."""
 
     smtp_entry = _entry(hass, arguments["smtp_entry_id"], "smtp")
     imap_entry = _entry(hass, arguments["imap_entry_id"], "imap")
     sender, sender_name = _smtp_sender(smtp_entry)
+    fallback_address = _sent_fallback_address(hass)
     to = [_validate_address(value) for value in arguments["to"]]
     cc = [_validate_address(value) for value in arguments.get("cc", [])]
     subject = str(arguments["subject"])
@@ -627,10 +818,17 @@ async def prepare_mail_send(hass: Any, arguments: dict[str, Any]) -> tuple[dict[
             recipients.append(address)
     if not recipients:
         raise SuiteBridgeError("MAIL_RECIPIENT_REQUIRED", "Mindst én modtager er påkrævet.", 422)
+    sent_record = configured_sent_folder_record(hass, imap_entry.entry_id)
+    if not sent_record or not sent_record.get("verified"):
+        raise SuiteBridgeError(
+            "MAIL_SENT_FOLDER_NOT_CONFIGURED",
+            "IMAP-kontoen har ingen verificeret Sent write-folder; kør Sent-folder autodetektion først.",
+            409,
+        )
     sent_folder = await hass.async_add_executor_job(
         _resolve_sent_folder_sync,
         imap_entry,
-        str(arguments.get("sent_folder") or "").strip() or None,
+        str(sent_record["folder"]),
     )
     message = EmailMessage(policy=policy.SMTP)
     message["From"] = formataddr((sender_name, sender)) if sender_name else sender
@@ -655,6 +853,9 @@ async def prepare_mail_send(hass: Any, arguments: dict[str, Any]) -> tuple[dict[
         "text": text,
         "signature_profile": signature_profile,
         "sent_folder": sent_folder,
+        "sent_folder_verified_at": sent_record.get("verified_at"),
+        "sent_folder_method": sent_record.get("method"),
+        "sent_fallback_address": fallback_address,
         "message_id": str(message["Message-ID"]),
         "mime_sha256": mime_sha256,
     }
@@ -718,22 +919,40 @@ def _smtp_send_sync(entry: Any, sender: str, recipients: list[str], raw: bytes) 
 def _append_sent_sync(entry: Any, folder: str, raw: bytes) -> None:
     client = _imap_connect(entry)
     try:
-        status, _ = client.append(folder, "\\Seen", None, raw)
+        status, response = client.append(folder, "\\Seen", None, raw)
         if status != "OK":
+            response_text = " ".join(
+                item.decode("utf-8", "replace") if isinstance(item, bytes) else str(item)
+                for item in (response or [])
+            ).strip()
+            details: dict[str, Any] = {
+                "outcome": "applied_unverified",
+                "failure_type": "imap_status",
+                "imap_status": str(status),
+            }
+            if response_text:
+                details["imap_response"] = response_text[:500]
             raise SuiteBridgeError(
                 "MAIL_SENT_APPEND_FAILED",
                 "Mailen blev sendt, men IMAP-kopien kunne ikke gemmes i Sent.",
                 502,
-                details={"outcome": "applied_unverified"},
+                details=details,
             )
     except SuiteBridgeError:
         raise
     except (imaplib.IMAP4.error, OSError, TimeoutError, ssl.SSLError) as err:
+        details = {
+            "outcome": "applied_unverified",
+            "failure_type": type(err).__name__,
+        }
+        reason = " ".join(str(err).split()).strip()
+        if reason:
+            details["reason"] = reason[:500]
         raise SuiteBridgeError(
             "MAIL_SENT_APPEND_FAILED",
             "Mailen blev sendt, men IMAP-kopien kunne ikke gemmes i Sent.",
             502,
-            details={"outcome": "applied_unverified"},
+            details=details,
         ) from err
     finally:
         try:
@@ -743,7 +962,7 @@ def _append_sent_sync(entry: Any, folder: str, raw: bytes) -> None:
 
 
 async def apply_mail_send(hass: Any, material: dict[str, Any]) -> dict[str, Any]:
-    """Send the exact prepared bytes and append the same bytes to IMAP Sent."""
+    """Send prepared bytes, archive in IMAP Sent, then use configured fallback only if needed."""
 
     smtp_entry = _entry(hass, material["smtp_entry_id"], "smtp")
     imap_entry = _entry(hass, material["imap_entry_id"], "imap")
@@ -779,8 +998,10 @@ async def apply_mail_send(hass: Any, material: dict[str, Any]) -> dict[str, Any]
             502,
             details={"outcome": "not_applied"},
         )
+
     sent_saved = False
     sent_error = None
+    sent_error_detail = None
     try:
         await hass.async_add_executor_job(
             _append_sent_sync,
@@ -790,13 +1011,61 @@ async def apply_mail_send(hass: Any, material: dict[str, Any]) -> dict[str, Any]
         )
         sent_saved = True
     except SuiteBridgeError as err:
-        # SMTP has already accepted at least one recipient. Do not raise here:
-        # returning a stable partially-verified result lets change.apply store
-        # it idempotently and prevents a blind resend.
+        # SMTP has already accepted at least one recipient. Never replay the
+        # original envelope just because Sent storage failed.
         sent_error = err.code
-    complete = not refused and sent_saved
-    if complete:
+        sent_error_detail = {
+            key: value for key, value in err.details.items() if key != "outcome"
+        } or None
+
+    fallback_address = str(material.get("sent_fallback_address") or "").strip() or None
+    fallback_copy_sent = False
+    fallback_copy_error = None
+    fallback_copy_mode = None
+    if not sent_saved and fallback_address:
+        fallback_key = fallback_address.casefold()
+        accepted_keys = {address.casefold() for address in accepted}
+        original_keys = {address.casefold() for address in material["recipients"]}
+        if fallback_key in accepted_keys:
+            # The configured archive address was already an intended and
+            # accepted recipient; a second copy would only create a duplicate.
+            fallback_copy_sent = True
+            fallback_copy_mode = "original_recipient"
+        elif fallback_key in original_keys:
+            fallback_copy_error = "MAIL_FALLBACK_RECIPIENT_REFUSED"
+        else:
+            try:
+                fallback_result = await hass.async_add_executor_job(
+                    _smtp_send_sync,
+                    smtp_entry,
+                    material["from"],
+                    [fallback_address],
+                    raw,
+                )
+                fallback_copy_sent = any(
+                    address.casefold() == fallback_key
+                    for address in fallback_result["accepted"]
+                )
+                fallback_copy_mode = "smtp_envelope_copy" if fallback_copy_sent else None
+                if not fallback_copy_sent:
+                    fallback_copy_error = "MAIL_FALLBACK_RECIPIENT_REFUSED"
+            except SuiteBridgeError as err:
+                # The original message is already sent. Report fallback failure
+                # without converting it into a retry of the customer delivery.
+                fallback_copy_error = err.code
+
+    archive_method = (
+        "imap_sent"
+        if sent_saved
+        else "fallback_smtp"
+        if fallback_copy_sent
+        else None
+    )
+    complete = not refused and archive_method is not None
+    if not refused and sent_saved:
         status = "sent_and_saved"
+    elif not refused and fallback_copy_sent:
+        status = "sent_and_archived_fallback"
     elif refused:
         status = "sent_partial"
     else:
@@ -812,5 +1081,11 @@ async def apply_mail_send(hass: Any, material: dict[str, Any]) -> dict[str, Any]
         "sent_folder": material["sent_folder"],
         "sent_saved": sent_saved,
         "sent_copy_error": sent_error,
+        "sent_copy_error_detail": sent_error_detail,
+        "sent_fallback_address": fallback_address,
+        "fallback_copy_sent": fallback_copy_sent,
+        "fallback_copy_mode": fallback_copy_mode,
+        "fallback_copy_error": fallback_copy_error,
+        "archive_method": archive_method,
         "verified": complete,
     }
