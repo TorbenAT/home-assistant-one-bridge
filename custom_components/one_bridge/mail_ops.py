@@ -563,6 +563,89 @@ async def mail_get(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _attachment_sync(entry: Any, folder: str, uid: str, index: int, offset: int, length: int) -> dict[str, Any]:
+    """Read a bounded PDF attachment chunk without marking the message Seen."""
+    import base64
+
+    client = _imap_connect(entry)
+    try:
+        _select_folder(client, folder)
+        status, data = client.uid("fetch", uid, "(BODY.PEEK[] RFC822.SIZE)")
+        if status != "OK" or not data:
+            raise SuiteBridgeError("MAIL_MESSAGE_NOT_FOUND", "Mailen blev ikke fundet.", 404)
+        raw = next((item[1] for item in data if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes)), None)
+        if raw is None or len(raw) > 12_000_000:
+            raise SuiteBridgeError("MAIL_MESSAGE_TOO_LARGE", "Mailen mangler eller er for stor.", 413)
+        message = BytesParser(policy=policy.default).parsebytes(raw)
+        parts = [part for part in message.walk() if part.get_filename() or part.get_content_disposition() == "attachment"]
+        if index >= len(parts):
+            raise SuiteBridgeError("MAIL_ATTACHMENT_NOT_FOUND", "Vedhæftningen blev ikke fundet.", 404)
+        part = parts[index]
+        filename = _decode_header(part.get_filename())
+        payload = part.get_payload(decode=True)
+        if not isinstance(payload, bytes) or len(payload) > 8_000_000 or not filename.lower().endswith(".pdf") or part.get_content_type() != "application/pdf" or not payload.startswith(b"%PDF-"):
+            raise SuiteBridgeError("MAIL_ATTACHMENT_INVALID", "Kun PDF-vedhæftninger på højst 8 MB tillades.", 422)
+        chunk = payload[offset:offset + length]
+        return {"uid": uid, "folder": folder, "attachment_index": index, "filename": filename, "content_type": "application/pdf", "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(), "offset": offset, "length": len(chunk), "base64": base64.b64encode(chunk).decode("ascii"), "has_more": offset + length < len(payload)}
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
+async def mail_attachment_get(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    entry = _entry(hass, arguments["imap_entry_id"], "imap")
+    uid = str(arguments["uid"])
+    if not uid.isdecimal() or int(uid) < 1:
+        raise SuiteBridgeError("MAIL_UID_INVALID", "UID skal være et positivt heltal.", 422)
+    return await hass.async_add_executor_job(_attachment_sync, entry, str(arguments.get("folder") or "INBOX"), uid, int(arguments["attachment_index"]), int(arguments.get("offset", 0)), int(arguments.get("length", 24000)))
+
+
+def _attachment_text_sync(entry: Any, folder: str, uid: str, index: int, page: int, max_chars: int) -> dict[str, Any]:
+    from io import BytesIO
+    from pypdf import PdfReader
+    client = _imap_connect(entry)
+    try:
+        _select_folder(client, folder)
+        status, data = client.uid("fetch", uid, "(BODY.PEEK[] RFC822.SIZE)")
+        if status != "OK" or not data:
+            raise SuiteBridgeError("MAIL_MESSAGE_NOT_FOUND", "Mailen blev ikke fundet.", 404)
+        raw = next((item[1] for item in data if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes)), None)
+        if raw is None or len(raw) > 12_000_000:
+            raise SuiteBridgeError("MAIL_MESSAGE_TOO_LARGE", "Mailen mangler eller er for stor.", 413)
+        message = BytesParser(policy=policy.default).parsebytes(raw)
+        parts = [part for part in message.walk() if part.get_filename() or part.get_content_disposition() == "attachment"]
+        if index >= len(parts):
+            raise SuiteBridgeError("MAIL_ATTACHMENT_NOT_FOUND", "Vedhæftningen blev ikke fundet.", 404)
+        part = parts[index]
+        payload = part.get_payload(decode=True)
+        filename = _decode_header(part.get_filename())
+        if not isinstance(payload, bytes) or len(payload) > 8_000_000 or not filename.lower().endswith(".pdf") or part.get_content_type() != "application/pdf" or not payload.startswith(b"%PDF-"):
+            raise SuiteBridgeError("MAIL_ATTACHMENT_INVALID", "Kun PDF-vedhæftninger på højst 8 MB tillades.", 422)
+        try:
+            reader = PdfReader(BytesIO(payload), strict=False)
+            count = len(reader.pages)
+            if count > 100 or page >= count:
+                raise SuiteBridgeError("MAIL_PDF_PAGE_INVALID", "PDF-siden findes ikke eller PDF har over 100 sider.", 422)
+            extracted = reader.pages[page].extract_text() or ""
+        except SuiteBridgeError:
+            raise
+        except Exception as err:
+            raise SuiteBridgeError("MAIL_PDF_TEXT_FAILED", "PDF-tekst kunne ikke udtrækkes.", 422) from err
+        return {"uid": uid, "folder": folder, "attachment_index": index, "filename": filename, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(), "page": page, "page_count": count, "text": extracted[:max_chars], "text_truncated": len(extracted) > max_chars, "extracted_chars": len(extracted), "security_notice": _UNTRUSTED_NOTICE}
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
+async def mail_attachment_text(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    entry = _entry(hass, arguments["imap_entry_id"], "imap")
+    return await hass.async_add_executor_job(_attachment_text_sync, entry, str(arguments.get("folder") or "INBOX"), str(arguments["uid"]), int(arguments["attachment_index"]), int(arguments.get("page", 0)), int(arguments.get("max_chars", 16000)))
+
+
 def _validate_address(value: str) -> str:
     text = str(value or "").strip()
     if "\r" in text or "\n" in text or not _EMAIL_RE.fullmatch(text):

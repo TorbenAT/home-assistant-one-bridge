@@ -404,9 +404,77 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return await _async_initialize(hass)
 
 
+def _register_mcp_readiness_api(hass: HomeAssistant, engine: SuiteBridgeEngine):
+    """Opt-in MCP readiness API: public target only, no dispatch or mutation.
+
+    Home Assistant's MCP Server serves registered LLM APIs.  This separate API
+    neither changes GPT Actions nor creates an additional network endpoint.
+    """
+    from homeassistant.exceptions import HomeAssistantError
+    from homeassistant.helpers import llm
+
+    class ReadinessTool(llm.Tool):
+        name = f"{DOMAIN}__readiness"
+        title = "One Bridge MCP readiness"
+        description = "Read One Bridge MCP readiness; no Home Assistant changes."
+        integration = DOMAIN
+        annotations = llm.ToolAnnotations(
+            read_only=True, destructive=False, idempotent=True, open_world=False
+        )
+
+        async def async_call(self, hass, tool_input, llm_context):
+            del tool_input
+            bridge = engine.config
+            if not bridge.enabled or bridge.role != "target" or "status:read" not in bridge.capabilities:
+                raise HomeAssistantError("One Bridge target/status access unavailable")
+            principal = getattr(llm_context, "context", None)
+            user_id = getattr(principal, "user_id", None)
+            if not user_id:
+                raise HomeAssistantError("Authenticated Home Assistant administrator required")
+            user = await hass.auth.async_get_user(user_id)
+            if user is None or not user.is_active or not user.is_admin:
+                raise HomeAssistantError("Active Home Assistant administrator required")
+            if bridge.require_owner and not user.is_owner:
+                raise HomeAssistantError("One Bridge owner permission required")
+            if bridge.allowed_user_ids and user.id not in bridge.allowed_user_ids:
+                raise HomeAssistantError("User not permitted by One Bridge")
+            return llm.ToolResult(data={
+                "product": "One Bridge", "role": "target", "mcp_read_only": True,
+                "permission_preset": bridge.permission_preset,
+                "read_only_lockdown": bool(bridge.read_only_lockdown),
+                "available_tools": [f"{DOMAIN}__readiness"],
+            })
+
+    class ReadinessAPI(llm.API):
+        async def async_get_api_instance(self, llm_context):
+            return llm.APIInstance(
+                api=self,
+                api_prompt="One Bridge MCP is in read-only testing. Never prepare or apply a change with this API.",
+                llm_context=llm_context,
+                tools=[ReadinessTool()],
+            )
+
+    return llm.async_register_api(
+        hass, ReadinessAPI(
+            hass=hass, id=f"{DOMAIN}-readiness",
+            name="One Bridge (experimental read-only)", requires_admin=True,
+        ),
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    del entry
-    return await _async_initialize(hass)
+    if not await _async_initialize(hass):
+        return False
+    # Deliberate default-off. A later target options-flow change will expose
+    # this switch; never activate MCP merely by upgrading the public component.
+    if entry.options.get("mcp_enabled", False) is not True:
+        return True
+    engine = hass.data[DOMAIN]["engine"]
+    bridge = engine.config
+    if not bridge.enabled or bridge.role != "target" or "status:read" not in bridge.capabilities:
+        return True
+    entry.async_on_unload(_register_mcp_readiness_api(hass, engine))
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

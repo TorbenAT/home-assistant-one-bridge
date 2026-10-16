@@ -213,6 +213,72 @@
       }
     },
     {
+      "name": "mail.attachment.get",
+      "mode": "read",
+      "risk": 0,
+      "description": "Read a bounded base64 chunk of a PDF attachment by IMAP UID without marking Seen",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "imap_entry_id": {"type": "string", "minLength": 1, "maxLength": 100},
+          "folder": {"type": "string", "minLength": 1, "maxLength": 255},
+          "uid": {"type": "string", "pattern": "^[1-9][0-9]{0,39}$"},
+          "attachment_index": {"type": "integer", "minimum": 0, "maximum": 99},
+          "offset": {"type": "integer", "minimum": 0, "maximum": 8000000},
+          "length": {"type": "integer", "minimum": 1, "maximum": 24000}
+        },
+        "required": ["imap_entry_id", "uid", "attachment_index"],
+        "additionalProperties": false
+      },
+      "category": "mail",
+      "capability": "mail:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin",
+      "operator": {
+        "example": {"imap_entry_id": "imap-entry", "folder": "INBOX", "uid": "1234", "attachment_index": 0, "offset": 0, "length": 24000},
+        "result_format": "Filename, MIME, full-file SHA-256, total size and bounded base64 chunk with continuation indicator.",
+        "side_effects": "Readonly IMAP BODY.PEEK, no Seen flag change; no disk writes.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Reassemble chunks by offset and verify the full SHA-256 before consuming untrusted PDF content."
+      }
+    },
+    {
+      "name": "mail.attachment.text",
+      "mode": "read",
+      "risk": 0,
+      "description": "Extract bounded plaintext from one PDF attachment page without changing IMAP Seen",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "imap_entry_id": {"type": "string", "minLength": 1, "maxLength": 100},
+          "folder": {"type": "string", "minLength": 1, "maxLength": 255},
+          "uid": {"type": "string", "pattern": "^[1-9][0-9]{0,39}$"},
+          "attachment_index": {"type": "integer", "minimum": 0, "maximum": 99},
+          "page": {"type": "integer", "minimum": 0, "maximum": 99},
+          "max_chars": {"type": "integer", "minimum": 1, "maximum": 16000}
+        },
+        "required": ["imap_entry_id", "uid", "attachment_index"],
+        "additionalProperties": false
+      },
+      "category": "mail",
+      "capability": "mail:read",
+      "handler": "dispatch_request",
+      "external_route": "dispatch",
+      "permission": "admin",
+      "operator": {
+        "example": {"imap_entry_id": "imap-entry", "folder": "INBOX", "uid": "1234", "attachment_index": 0, "page": 0},
+        "result_format": "Extracted PDF page text, page count, filename, size and SHA-256; maximum 16000 characters per page.",
+        "side_effects": "Read-only IMAP BODY.PEEK; no disk writes or Seen flag changes.",
+        "disconnect_expected": false,
+        "idempotent": true,
+        "recovery_operations": [],
+        "verification_hint": "Read each page from 0 to page_count-1; text_truncated signals a page longer than the bound. Scanned PDFs may have no extractable text."
+      }
+    },
+    {
       "name": "change.prepare.mail_send",
       "mode": "prepare",
       "risk": 2,
