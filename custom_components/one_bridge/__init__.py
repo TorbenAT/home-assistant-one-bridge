@@ -513,8 +513,10 @@ def _register_mcp_readiness_api(
 
     class ReadinessAPI(llm.API):
         async def async_get_api_instance(self, llm_context):
-            if entry.options.get("mcp_enabled", False) is not True:
-                raise HomeAssistantError("One Bridge MCP disabled")
+            # The MCP server checks admin privileges at the endpoint. Apply
+            # One Bridge's additional owner/user ACL during discovery as well
+            # as at call time, so disallowed users see no tools or prompt.
+            await _require_admin(self.hass, llm_context, "status:read")
             tools = [ReadinessTool()]
             if "control:read" in engine.config.capabilities:
                 tools.extend([EntitySearchTool(), StateGetTool()])
@@ -528,7 +530,7 @@ def _register_mcp_readiness_api(
     return llm.async_register_api(
         hass, ReadinessAPI(
             hass=hass, id=f"{DOMAIN}-readiness",
-            name="One Bridge (experimental read-only)", requires_admin=True,
+            name="One Bridge (experimental read-only)",
         ),
     )
 
