@@ -5,9 +5,9 @@
   "api_version": 1,
   "api_prefix": "/api/one_bridge/v1",
   "public_repository": "https://github.com/TorbenAT/home-assistant-one-bridge",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "homeassistant_min": "2025.10.0",
-  "tag": "v0.9.12",
-  "tree_sha256": "825828a4a578695791ffd39a600cd7ae908bd81b7bc041cd62cfde701d32c48c",
+  "tag": "v0.9.13",
+  "tree_sha256": "b6a5347edb80772b421eb6eebe7b247c76fae2babb9471bd9484be26f8bf056d",
   "license_included": true
 }

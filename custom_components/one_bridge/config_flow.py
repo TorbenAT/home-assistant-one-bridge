@@ -549,6 +549,10 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
             try:
                 signature_options = _mail_signature_options(user_input)
                 self._pending_signature_options = signature_options
+                # MCP is an explicit, target-only opt-in; do not modify OAuth.
+                self._pending_mcp_enabled = (
+                    role == "target" and user_input.get("mcp_enabled") is True
+                )
                 updated = dict(raw)
                 updated.update(
                     {
@@ -616,6 +620,13 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                 ): str,
             }
         )
+        if role == "target":
+            schema = schema.extend({
+                vol.Required(
+                    "mcp_enabled",
+                    default=entry_options.get("mcp_enabled") is True,
+                ): bool,
+            })
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 
     async def async_step_capabilities(self, user_input=None):
@@ -671,6 +682,10 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                         "permission_preset": raw.get("permission_preset"),
                         "callback_url": (raw.get("allowed_redirect_uris") or [""])[0],
                         "read_only_lockdown": bool(raw.get("read_only_lockdown", False)),
+                        "mcp_enabled": bool(
+                            raw.get("role") == "target"
+                            and getattr(self, "_pending_mcp_enabled", False)
+                        ),
                     }
                 )
                 return self.async_create_entry(title="", data=options)

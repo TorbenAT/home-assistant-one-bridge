@@ -61,6 +61,7 @@
           "require_owner": "Kræv ejer",
           "persistent_refresh_token": "Vedvarende Home Assistant-refresh-token",
           "read_only_lockdown": "Lås til kun læsning",
+          "mcp_enabled": "Aktivér eksperimentel One Bridge MCP-status (kun læsning)",
           "rotate_client_secret": "Generér et nyt OAuth client secret",
           "internal_ws_url": "Intern WebSocket-URL (tom = Auto)",
           "internal_ws_verify_ssl": "Verificer SSL for intern WebSocket"
@@ -71,6 +72,7 @@
           "require_admin": "Tillad kun Home Assistant-administratorer at bruge bridgen.",
           "require_owner": "Kræv desuden Home Assistant-ejerkontoen.",
           "read_only_lockdown": "Bloker prepare/apply-ændringer, men behold de tilladte read-operationer.",
+          "mcp_enabled": "Kun for target-installationer. Viser ét MCP-statusværktøj til HA-administratorer via Home Assistants MCP-server efter genstart. Ingen enhedsstyring eller ændringer er mulige i denne testfunktion.",
           "rotate_client_secret": "Genererer et nyt secret og viser det én gang på næste skærm. Det eksisterende secret forbliver aktivt, medmindre du bekræfter de stagede indstillinger.",
           "internal_ws_url": "Valgfrit loopback-WebSocket-endpoint, der slutter med /api/websocket; lad feltet være tomt for Auto.",
           "internal_ws_verify_ssl": "Verificer TLS-certifikater, når den interne WebSocket bruger wss://."
