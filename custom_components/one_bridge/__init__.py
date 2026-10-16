@@ -19,8 +19,9 @@ from .config import async_load_config, setup_access_token
 from .const import API_VERSION, DOMAIN, PREPARE_TTL_SECONDS, PRIVATE_CONFIG_RELATIVE
 from .dispatch import OperationCatalog
 from .engine import SuiteBridgeEngine
+from .entity import get_states, search_entities
 from .mail_runtime import activate_mail_feature
-from .models import digest_json
+from .models import SuiteBridgeError, digest_json
 from .prepared import PreparedMutationStore
 from .views import (
     ApplyView,
@@ -410,8 +411,28 @@ def _register_mcp_readiness_api(hass: HomeAssistant, engine: SuiteBridgeEngine):
     Home Assistant's MCP Server serves registered LLM APIs.  This separate API
     neither changes GPT Actions nor creates an additional network endpoint.
     """
+    import probatio
     from homeassistant.exceptions import HomeAssistantError
     from homeassistant.helpers import llm
+
+    async def _require_admin(hass, llm_context, capability):
+        bridge = engine.config
+        if not bridge.enabled or bridge.role != "target" or "status:read" not in bridge.capabilities:
+            raise HomeAssistantError("One Bridge MCP target/status access unavailable")
+        if capability not in bridge.capabilities:
+            raise HomeAssistantError("One Bridge MCP capability unavailable")
+        principal = getattr(llm_context, "context", None)
+        user_id = getattr(principal, "user_id", None)
+        if not user_id:
+            raise HomeAssistantError("Authenticated Home Assistant administrator required")
+        user = await hass.auth.async_get_user(user_id)
+        if user is None or not user.is_active or not user.is_admin:
+            raise HomeAssistantError("Active Home Assistant administrator required")
+        if bridge.require_owner and not user.is_owner:
+            raise HomeAssistantError("One Bridge owner permission required")
+        if bridge.allowed_user_ids and user.id not in bridge.allowed_user_ids:
+            raise HomeAssistantError("User not permitted by One Bridge")
+        return bridge
 
     class ReadinessTool(llm.Tool):
         name = f"{DOMAIN}__readiness"
@@ -424,34 +445,76 @@ def _register_mcp_readiness_api(hass: HomeAssistant, engine: SuiteBridgeEngine):
 
         async def async_call(self, hass, tool_input, llm_context):
             del tool_input
-            bridge = engine.config
-            if not bridge.enabled or bridge.role != "target" or "status:read" not in bridge.capabilities:
-                raise HomeAssistantError("One Bridge target/status access unavailable")
-            principal = getattr(llm_context, "context", None)
-            user_id = getattr(principal, "user_id", None)
-            if not user_id:
-                raise HomeAssistantError("Authenticated Home Assistant administrator required")
-            user = await hass.auth.async_get_user(user_id)
-            if user is None or not user.is_active or not user.is_admin:
-                raise HomeAssistantError("Active Home Assistant administrator required")
-            if bridge.require_owner and not user.is_owner:
-                raise HomeAssistantError("One Bridge owner permission required")
-            if bridge.allowed_user_ids and user.id not in bridge.allowed_user_ids:
-                raise HomeAssistantError("User not permitted by One Bridge")
+            bridge = await _require_admin(hass, llm_context, "status:read")
+            available = [f"{DOMAIN}__readiness"]
+            if "control:read" in bridge.capabilities:
+                available.extend([f"{DOMAIN}__entity_search", f"{DOMAIN}__state_get"])
             return llm.ToolResult(data={
                 "product": "One Bridge", "role": "target", "mcp_read_only": True,
                 "permission_preset": bridge.permission_preset,
                 "read_only_lockdown": bool(bridge.read_only_lockdown),
-                "available_tools": [f"{DOMAIN}__readiness"],
+                "available_tools": available,
             })
+
+    class EntitySearchTool(llm.Tool):
+        name = f"{DOMAIN}__entity_search"
+        title = "Find Home Assistant entities"
+        description = "Search Home Assistant entity IDs and names, at most 20 results. Read-only."
+        integration = DOMAIN
+        annotations = llm.ToolAnnotations(
+            read_only=True, destructive=False, idempotent=True, open_world=False
+        )
+        parameters = probatio.Schema({
+            probatio.Required("query"): str,
+            probatio.Optional("limit"): probatio.All(int, probatio.Range(min=1, max=20)),
+        })
+
+        async def async_call(self, hass, tool_input, llm_context):
+            await _require_admin(hass, llm_context, "control:read")
+            arguments = tool_input.tool_args
+            query = arguments["query"].strip()
+            if not 1 <= len(query) <= 80:
+                raise HomeAssistantError("Search query must contain 1-80 characters")
+            return llm.ToolResult(data=search_entities(hass, {
+                "query": query, "limit": arguments.get("limit", 10),
+            }))
+
+    class StateGetTool(llm.Tool):
+        name = f"{DOMAIN}__state_get"
+        title = "Read Home Assistant entity states"
+        description = "Read current states of 1-20 entity IDs without attributes. Read-only."
+        integration = DOMAIN
+        annotations = llm.ToolAnnotations(
+            read_only=True, destructive=False, idempotent=True, open_world=False
+        )
+        parameters = probatio.Schema({probatio.Required("entity_ids"): [str]})
+
+        async def async_call(self, hass, tool_input, llm_context):
+            await _require_admin(hass, llm_context, "control:read")
+            ids = tool_input.tool_args["entity_ids"]
+            if not 1 <= len(ids) <= 20 or any(
+                not isinstance(item, str) or len(item) > 150 or item.count(".") != 1
+                for item in ids
+            ):
+                raise HomeAssistantError("Provide 1-20 valid entity IDs")
+            try:
+                result = get_states(hass, {
+                    "entity_ids": ids, "include_attributes": False,
+                })
+            except SuiteBridgeError as err:
+                raise HomeAssistantError("One or more requested entities were not found") from err
+            return llm.ToolResult(data=result)
 
     class ReadinessAPI(llm.API):
         async def async_get_api_instance(self, llm_context):
+            tools = [ReadinessTool()]
+            if "control:read" in engine.config.capabilities:
+                tools.extend([EntitySearchTool(), StateGetTool()])
             return llm.APIInstance(
                 api=self,
-                api_prompt="One Bridge MCP is in read-only testing. Never prepare or apply a change with this API.",
+                api_prompt="One Bridge MCP is in read-only testing. Only search for and read entity states. Never prepare or apply a change with this API.",
                 llm_context=llm_context,
-                tools=[ReadinessTool()],
+                tools=tools,
             )
 
     return llm.async_register_api(
