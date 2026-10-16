@@ -405,7 +405,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return await _async_initialize(hass)
 
 
-def _register_mcp_readiness_api(hass: HomeAssistant, engine: SuiteBridgeEngine):
+def _register_mcp_readiness_api(
+    hass: HomeAssistant, engine: SuiteBridgeEngine, entry: ConfigEntry
+):
     """Opt-in MCP readiness API: public target only, no dispatch or mutation.
 
     Home Assistant's MCP Server serves registered LLM APIs.  This separate API
@@ -416,6 +418,10 @@ def _register_mcp_readiness_api(hass: HomeAssistant, engine: SuiteBridgeEngine):
     from homeassistant.helpers import llm
 
     async def _require_admin(hass, llm_context, capability):
+        # The config entry may not fully unload until an HA restart.
+        # Check live opt-in on each request, including after options changes.
+        if entry.options.get("mcp_enabled", False) is not True:
+            raise HomeAssistantError("One Bridge MCP disabled")
         bridge = engine.config
         if not bridge.enabled or bridge.role != "target" or "status:read" not in bridge.capabilities:
             raise HomeAssistantError("One Bridge MCP target/status access unavailable")
@@ -507,6 +513,8 @@ def _register_mcp_readiness_api(hass: HomeAssistant, engine: SuiteBridgeEngine):
 
     class ReadinessAPI(llm.API):
         async def async_get_api_instance(self, llm_context):
+            if entry.options.get("mcp_enabled", False) is not True:
+                raise HomeAssistantError("One Bridge MCP disabled")
             tools = [ReadinessTool()]
             if "control:read" in engine.config.capabilities:
                 tools.extend([EntitySearchTool(), StateGetTool()])
@@ -536,7 +544,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     bridge = engine.config
     if not bridge.enabled or bridge.role != "target" or "status:read" not in bridge.capabilities:
         return True
-    entry.async_on_unload(_register_mcp_readiness_api(hass, engine))
+    entry.async_on_unload(_register_mcp_readiness_api(hass, engine, entry))
     return True
 
 
