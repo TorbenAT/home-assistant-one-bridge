@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -207,6 +208,16 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+def _string_values(data: Any) -> list[str]:
+    if isinstance(data, str):
+        return [data.casefold()]
+    if isinstance(data, dict):
+        return [text for value in data.values() for text in _string_values(value)]
+    if isinstance(data, list):
+        return [text for value in data for text in _string_values(value)]
+    return []
+
+
 def _registry_item(item: Any) -> dict[str, Any]:
     # Registry entries carry datetimes, enums and sets; return plain JSON.
     return json.loads(json.dumps(_registry_item_raw(item), default=_json_default))
@@ -255,9 +266,12 @@ async def registry_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> d
     registry = _registry_for(hass, arguments["registry"])
     query = str(arguments.get("query") or "").casefold()
     entries = []
+    # Match at the start of a word in any value, so "sensor." finds sensor.x
+    # but not binary_sensor.x, and "køkken" still finds "Lampe køkken".
+    pattern = re.compile(r"(?<!\w)" + re.escape(query)) if query else None
     for item in _registry_items(registry, arguments["registry"]):
         data = _registry_item(item)
-        if query and query not in str(data).casefold():
+        if pattern and not any(pattern.search(value) for value in _string_values(data)):
             continue
         entries.append(data)
         # Contract alignment: ha.registry.list caps limit at 200.
