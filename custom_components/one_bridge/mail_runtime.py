@@ -50,10 +50,16 @@ _MAIL_OPERATIONS = frozenset(
 )
 
 
+# Read once at import time. Home Assistant imports custom integrations in an
+# executor thread, so this keeps the blocking file read out of the event loop
+# (activate_mail_feature runs inside async_setup_entry).
+_MAIL_CONTRACT_DOCUMENT = json.loads(
+    Path(__file__).with_name("mail_operations.v2.json").read_text(encoding="utf-8")
+)
+
+
 def _load_mail_contract() -> OperationCatalog:
-    path = Path(__file__).with_name("mail_operations.v2.json")
-    document = json.loads(path.read_text(encoding="utf-8"))
-    return OperationCatalog(document)
+    return OperationCatalog(deepcopy(_MAIL_CONTRACT_DOCUMENT))
 
 
 def _extend_catalog(catalog: OperationCatalog) -> None:

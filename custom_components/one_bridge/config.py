@@ -42,6 +42,10 @@ class BridgeConfig:
     # Bridge-hosted MCP endpoint for ChatGPT plugins. Off unless explicitly
     # enabled; it reuses this config's OAuth client and capability policy.
     mcp_endpoint_enabled: bool = False
+    # Source role only: lets the MCP endpoint run bridge deployment and
+    # repository cleanup operations (otherwise GPT Action only). Off unless the
+    # owner explicitly enables it in Options.
+    mcp_deployment_enabled: bool = False
 
     @property
     def capabilities(self) -> frozenset[str]:
@@ -313,6 +317,11 @@ def _load_file(path: Path) -> BridgeConfig:
             # Only present when enabled, so existing configs keep their exact
             # config_sha256 after upgrade.
             **({"mcp_endpoint_enabled": True} if raw.get("mcp_endpoint_enabled") is True else {}),
+            **(
+                {"mcp_deployment_enabled": True}
+                if role == "source" and raw.get("mcp_deployment_enabled") is True
+                else {}
+            ),
         }
         return BridgeConfig(
             enabled=normalized["enabled"],
@@ -334,6 +343,7 @@ def _load_file(path: Path) -> BridgeConfig:
             internal_ws_verify_ssl=normalized["internal_ws_verify_ssl"],
             config_sha256=digest_json(normalized),
             mcp_endpoint_enabled=normalized.get("mcp_endpoint_enabled") is True,
+            mcp_deployment_enabled=normalized.get("mcp_deployment_enabled") is True,
         )
     except ValueError as err:
         return _disabled(str(err))

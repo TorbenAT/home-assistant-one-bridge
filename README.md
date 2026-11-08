@@ -97,6 +97,8 @@ One Bridge can also serve ChatGPT as a custom MCP connector on `/api/one_bridge/
 
 The connector exposes at most four tools: `bridge_read`, `bridge_run`, `bridge_prepare` and `bridge_apply`. `bridge_read` only runs side-effect-free reads; the few read operations that start work (such as an ESPHome compile) go through `bridge_run`, which ChatGPT confirms first. Prepare and apply are only listed when the preset allows `mutation:apply` and read-only lockdown is off. Apply executes only a server-bound `prepare_id` with an idempotency key, and ChatGPT asks for confirmation before it runs. Disabling the endpoint makes it return 404 immediately.
 
+**Reverse proxy required.** ChatGPT's connector sends an `X-Forwarded-For` header, and Home Assistant rejects such requests unless they come from a trusted proxy. Put Home Assistant behind a reverse proxy (for example the NGINX Home Assistant SSL proxy add-on, port 443 to Home Assistant 8123) and configure `http:` with `use_x_forwarded_for: true` and `trusted_proxies` containing the proxy address (the add-on network is `172.30.33.0/24`). Expose only the proxy port externally.
+
 ## Public repository scope
 
 This repository contains the Home Assistant integration and public validation only. Private deployment state, OAuth credentials, local release policy and historical source-repository data are intentionally excluded.

@@ -70,6 +70,26 @@ _INVALID_PARAMS = -32602
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
+# Deployment of the bridge itself and destructive public-repository cleanup stay
+# GPT Action only. MCP refuses to prepare them and refuses to apply a prepare of
+# them, even one created through the GPT Action by the same user. Names are the
+# catalog operation names, which are also the names the prepared store records.
+# The public target build replaces this block with an empty set (it ships none of
+# these operations); see scripts/build-release.sh.
+MCP_DENIED_OPERATIONS: frozenset[str] = frozenset()
+
+
+def _denied_operations(engine: SuiteBridgeEngine) -> frozenset[str]:
+    """Operations MCP refuses; empty when the owner enabled MCP deployment.
+
+    ``mcp_deployment_enabled`` is honored only for the source role (see
+    config.py), is off by default and is read per request, so turning it off in
+    Options takes effect immediately.
+    """
+    if getattr(engine.config, "mcp_deployment_enabled", False) is True:
+        return frozenset()
+    return MCP_DENIED_OPERATIONS
+
 
 def _mcp_enabled(engine: SuiteBridgeEngine) -> bool:
     config = engine.config
@@ -86,6 +106,7 @@ def _writable(engine: SuiteBridgeEngine) -> bool:
 
 
 def _apply_operations(engine: SuiteBridgeEngine) -> list[str]:
+    denied = _denied_operations(engine)
     return sorted(
         {
             str(item.get("name"))
@@ -93,7 +114,17 @@ def _apply_operations(engine: SuiteBridgeEngine) -> list[str]:
             if item.get("mode") == "apply"
             and item.get("capability") in engine.config.capabilities
             and item.get("name") in engine.implemented_operations
+            and item.get("name") not in denied
         }
+    )
+
+
+def _denied(operation: str) -> SuiteBridgeError:
+    return SuiteBridgeError(
+        "MCP_OPERATION_NOT_ALLOWED",
+        f"{operation} er kun tilladt via MCP, når 'Tillad deploy via MCP' er slået til i One Bridge Options.",
+        HTTPStatus.FORBIDDEN,
+        details={"field": "operation"},
     )
 
 
@@ -492,6 +523,9 @@ class McpView(HomeAssistantView):
             TOOL_APPLY: "apply",
         }[name]
         try:
+            denied = _denied_operations(self._engine)
+            if operation in denied:
+                raise _denied(operation)
             side_effect_reads = _side_effect_reads(self._engine)
             if name == TOOL_READ and operation in side_effect_reads:
                 raise SuiteBridgeError(
@@ -527,6 +561,19 @@ class McpView(HomeAssistantView):
                 auth = self._authorizer.authorize(
                     request, "mutation:apply", mutation=True, require_bound_client=True
                 )
+                prepare_id = (
+                    payload["arguments"].get("prepare_id")
+                    if isinstance(payload.get("arguments"), dict)
+                    else None
+                )
+                if isinstance(prepare_id, str) and prepare_id:
+                    prepared = await self._engine.prepared.status(
+                        prepare_id=prepare_id,
+                        user_id=auth.user_id,
+                        refresh_token_id=auth.refresh_token_id,
+                    )
+                    if prepared.get("operation") in denied:
+                        raise _denied(str(prepared["operation"]))
                 outcome = await self._engine.apply_request(payload, auth)
             else:
                 payload["mode"] = mode

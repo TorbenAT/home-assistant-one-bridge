@@ -14,3 +14,19 @@ mail_send_prepared:
       required: true
       selector:
         text:
+mail_sent_folder_detect_prepared:
+  name: Detect sent folder (prepared)
+  description: Internal One Bridge service that executes only an active server-prepared sent-folder detection.
+  fields:
+    prepare_id:
+      name: Prepare ID
+      description: Server-generated identifier for the active prepared mutation.
+      required: true
+      selector:
+        text:
+    imap_entry_id:
+      name: IMAP entry ID
+      description: Config entry ID of the IMAP integration bound in the prepared mutation.
+      required: true
+      selector:
+        text:

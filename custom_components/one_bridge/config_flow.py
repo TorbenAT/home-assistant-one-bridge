@@ -594,6 +594,11 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                     updated["mcp_endpoint_enabled"] = True
                 else:
                     updated.pop("mcp_endpoint_enabled", None)
+                # Source role only: allow bridge deployment/cleanup via MCP.
+                if role == "source" and user_input.get("mcp_deployment_enabled") is True:
+                    updated["mcp_deployment_enabled"] = True
+                else:
+                    updated.pop("mcp_deployment_enabled", None)
                 preset = str(user_input.get("permission_preset", current_preset))
                 rotate_secret = bool(user_input.get("rotate_client_secret", False))
                 if preset == "custom":
@@ -649,6 +654,13 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                 ): str,
             }
         )
+        if role == "source":
+            schema = schema.extend({
+                vol.Required(
+                    "mcp_deployment_enabled",
+                    default=raw.get("mcp_deployment_enabled") is True,
+                ): bool,
+            })
         if role == "target":
             schema = schema.extend({
                 vol.Required(
@@ -712,6 +724,7 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                         "callback_url": _first_callback(raw, CALLBACK_GPT_ACTION),
                         "mcp_callback_url": _first_callback(raw, CALLBACK_MCP_CONNECTOR),
                         "mcp_endpoint_enabled": raw.get("mcp_endpoint_enabled") is True,
+                        "mcp_deployment_enabled": raw.get("mcp_deployment_enabled") is True,
                         "read_only_lockdown": bool(raw.get("read_only_lockdown", False)),
                         "mcp_enabled": bool(
                             raw.get("role") == "target"
