@@ -22,5 +22,5 @@
     "pypdf==5.9.0"
   ],
   "single_config_entry": true,
-  "version": "0.9.19"
+  "version": "0.9.20"
 }
