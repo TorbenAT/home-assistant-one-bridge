@@ -87,6 +87,16 @@ One Bridge uses the Home Assistant domain `one_bridge`, its own `/api/one_bridge
 
 One Bridge options can later change the callback URL, access preset/capabilities, read-only lockdown and OAuth security settings. Client-secret rotation is available from Options and the replacement secret is shown once. If permissions change, re-import the same stable schema URL in the GPT editor so its operation list is refreshed.
 
+## ChatGPT MCP connector (optional, off by default)
+
+One Bridge can also serve ChatGPT as a custom MCP connector on `/api/one_bridge/v1/mcp`, using the same OAuth client, access preset and read-only lockdown as the GPT Action.
+
+1. In One Bridge Options, enable **ChatGPT MCP endpoint**.
+2. In ChatGPT, add a custom MCP server with that URL, choose OAuth and, under advanced OAuth settings, use your own client: the same Client ID and Client Secret as the GPT Action.
+3. Copy the callback URL ChatGPT shows (it ends in `/connector/oauth/` followed by an ID) into the **ChatGPT MCP connector callback URL** field in One Bridge Options, then connect.
+
+The connector exposes at most four tools: `bridge_read`, `bridge_run`, `bridge_prepare` and `bridge_apply`. `bridge_read` only runs side-effect-free reads; the few read operations that start work (such as an ESPHome compile) go through `bridge_run`, which ChatGPT confirms first. Prepare and apply are only listed when the preset allows `mutation:apply` and read-only lockdown is off. Apply executes only a server-bound `prepare_id` with an idempotency key, and ChatGPT asks for confirmation before it runs. Disabling the endpoint makes it return 404 immediately.
+
 ## Public repository scope
 
 This repository contains the Home Assistant integration and public validation only. Private deployment state, OAuth credentials, local release policy and historical source-repository data are intentionally excluded.

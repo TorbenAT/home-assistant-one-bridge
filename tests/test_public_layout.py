@@ -26,6 +26,7 @@ assert list(manifest) == [
     "integration_type",
     "iot_class",
     "issue_tracker",
+    "requirements",
     "single_config_entry",
     "version",
 ]

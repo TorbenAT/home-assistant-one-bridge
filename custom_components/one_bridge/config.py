@@ -8,6 +8,7 @@ import hmac
 import ipaddress
 import json
 from pathlib import Path
+import string
 from typing import Any
 from urllib.parse import urlparse
 
@@ -38,6 +39,9 @@ class BridgeConfig:
     internal_ws_verify_ssl: bool
     config_sha256: str
     error: str | None = None
+    # Bridge-hosted MCP endpoint for ChatGPT plugins. Off unless explicitly
+    # enabled; it reuses this config's OAuth client and capability policy.
+    mcp_endpoint_enabled: bool = False
 
     @property
     def capabilities(self) -> frozenset[str]:
@@ -91,6 +95,56 @@ def setup_access_authorized(supplied: Any, client_secret_sha256: str) -> bool:
     if not expected or not supplied_text:
         return False
     return hmac.compare_digest(supplied_text, expected)
+
+
+CALLBACK_GPT_ACTION = "gpt_action"
+CALLBACK_MCP_CONNECTOR = "mcp_connector"
+_CONNECTOR_ID_CHARS = frozenset(string.ascii_letters + string.digits + "-_")
+
+
+def callback_kind(value: Any) -> str:
+    """Classify an official ChatGPT OAuth callback URL, or raise ValueError.
+
+    Two exact shapes are accepted, nothing else:
+    - GPT Action:      https://chat.openai.com|chatgpt.com/aip/<gpt-id>/oauth/callback
+    - MCP connector:   https://chatgpt.com/connector/oauth/<callback-id>
+
+    The GPT Action rule is exactly the pre-MCP loader rule, so a config that
+    loaded before still loads after upgrade. The new connector rule is
+    stricter: no explicit port and an ASCII ``[A-Za-z0-9_-]{1,64}`` ID.
+    """
+    raw = str(value or "").strip()
+    text = _https_url(raw, "redirect_uri")
+    parsed = urlparse(text)
+    parts = parsed.path.split("/")
+    if text != raw or parsed.hostname not in {"chat.openai.com", "chatgpt.com"}:
+        raise ValueError("Kun officielle ChatGPT callback-URL'er er tilladt.")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("Callback-stien har et uventet format.")
+    if len(parts) == 5 and parts[1] == "aip" and parts[2] and parts[3:] == ["oauth", "callback"]:
+        return CALLBACK_GPT_ACTION
+    if (
+        parsed.hostname == "chatgpt.com"
+        and parsed.port is None
+        and len(parts) == 4
+        and parts[1:3] == ["connector", "oauth"]
+        and 1 <= len(parts[3]) <= 64
+        and all(ch in _CONNECTOR_ID_CHARS for ch in parts[3])
+    ):
+        return CALLBACK_MCP_CONNECTOR
+    raise ValueError("Callback-stien har et uventet format.")
+
+
+def callbacks_of_kind(uris: Any, kind: str) -> list[str]:
+    """Return the stored callbacks of one kind, ignoring invalid entries."""
+    found: list[str] = []
+    for uri in uris or []:
+        try:
+            if callback_kind(uri) == kind:
+                found.append(str(uri))
+        except ValueError:
+            continue
+    return found
 
 
 def _https_url(value: Any, field: str) -> str:
@@ -224,15 +278,8 @@ def _load_file(path: Path) -> BridgeConfig:
             raise ValueError("allowed_redirect_uris skal være en liste.")
         redirects: list[str] = []
         for value in redirects_raw:
-            raw_redirect = str(value or "").strip()
-            redirect = _https_url(raw_redirect, "redirect_uri")
-            parsed = urlparse(redirect)
-            parts = parsed.path.split("/")
-            if redirect != raw_redirect or parsed.hostname not in {"chat.openai.com", "chatgpt.com"}:
-                raise ValueError("Kun officielle ChatGPT callback-URL'er er tilladt.")
-            if parsed.params or parsed.query or parsed.fragment or len(parts) != 5 or parts[1] != "aip" or not parts[2] or parts[3:] != ["oauth", "callback"]:
-                raise ValueError("Callback-stien har et uventet format.")
-            redirects.append(redirect)
+            callback_kind(value)
+            redirects.append(str(value).strip())
 
         users_raw = raw.get("allowed_user_ids", [])
         if not isinstance(users_raw, list):
@@ -263,6 +310,9 @@ def _load_file(path: Path) -> BridgeConfig:
             # TLS verification for internal wss:// transport is on by default;
             # an explicit false in the config file is still honored.
             "internal_ws_verify_ssl": bool(raw.get("internal_ws_verify_ssl", True)),
+            # Only present when enabled, so existing configs keep their exact
+            # config_sha256 after upgrade.
+            **({"mcp_endpoint_enabled": True} if raw.get("mcp_endpoint_enabled") is True else {}),
         }
         return BridgeConfig(
             enabled=normalized["enabled"],
@@ -283,6 +333,7 @@ def _load_file(path: Path) -> BridgeConfig:
             internal_ws_url=normalized["internal_ws_url"],
             internal_ws_verify_ssl=normalized["internal_ws_verify_ssl"],
             config_sha256=digest_json(normalized),
+            mcp_endpoint_enabled=normalized.get("mcp_endpoint_enabled") is True,
         )
     except ValueError as err:
         return _disabled(str(err))

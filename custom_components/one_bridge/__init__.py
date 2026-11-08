@@ -21,6 +21,7 @@ from .dispatch import OperationCatalog
 from .engine import SuiteBridgeEngine
 from .entity import get_states, search_entities
 from .mail_runtime import activate_mail_feature
+from .mcp_http import MCP_PATH, McpAuthorizationServerView, McpProtectedResourceView, McpView
 from .models import SuiteBridgeError, digest_json
 from .prepared import PreparedMutationStore
 from .views import (
@@ -253,6 +254,14 @@ class GPTSetupView(_BaseGPTSetupView):
             ("privacy-url", "Privacy Policy URL", f"{base}/api/one_bridge/v1/privacy"),
             ("gpt-instructions", "GPT Instructions", public_instructions.rstrip()),
         ]
+        if getattr(config, "mcp_endpoint_enabled", False) is True:
+            values.append(
+                (
+                    "mcp-url",
+                    "ChatGPT MCP plugin URL (OAuth: predefined client with the Client ID and secret above)",
+                    f"{base}{MCP_PATH}",
+                )
+            )
         oauth_bundle = "\n".join(
             f"{label}: {value}" for _, label, value in values[:4]
         )
@@ -335,6 +344,11 @@ async def _async_initialize(hass: HomeAssistant) -> bool:
     hass.http.register_view(GPTInstructionsView(engine))
     hass.http.register_view(GPTSetupView(engine))
     hass.http.register_view(PrivacyPolicyView())
+    # Bridge-hosted ChatGPT MCP endpoint; each view returns 404 until
+    # mcp_endpoint_enabled is set, and re-reads engine.config per request.
+    hass.http.register_view(McpView(engine, authorizer))
+    hass.http.register_view(McpProtectedResourceView(engine))
+    hass.http.register_view(McpAuthorizationServerView(engine))
     for view_cls in (
         DispatchView,
         ApplyView,
@@ -440,6 +454,20 @@ def _register_mcp_readiness_api(
             raise HomeAssistantError("User not permitted by One Bridge")
         return bridge
 
+    def _strict_args(tool_input, required: set[str], optional: set[str]) -> dict[str, Any]:
+        # Home Assistant's MCP server does not enforce the advertised schema
+        # before calling a tool (verified on 2026.11.0), so fail closed here.
+        arguments = getattr(tool_input, "tool_args", None) or {}
+        if not isinstance(arguments, dict):
+            raise HomeAssistantError("Tool arguments must be an object")
+        unknown = set(arguments) - required - optional
+        if unknown:
+            raise HomeAssistantError("Unknown tool arguments: " + ", ".join(sorted(map(str, unknown))))
+        missing = required - set(arguments)
+        if missing:
+            raise HomeAssistantError("Missing tool arguments: " + ", ".join(sorted(missing)))
+        return arguments
+
     class ReadinessTool(llm.Tool):
         name = f"{DOMAIN}__readiness"
         title = "One Bridge MCP readiness"
@@ -450,8 +478,8 @@ def _register_mcp_readiness_api(
         )
 
         async def async_call(self, hass, tool_input, llm_context):
-            del tool_input
             bridge = await _require_admin(hass, llm_context, "status:read")
+            _strict_args(tool_input, set(), set())
             available = [f"{DOMAIN}__readiness"]
             if "control:read" in bridge.capabilities:
                 available.extend([f"{DOMAIN}__entity_search", f"{DOMAIN}__state_get"])
@@ -477,12 +505,16 @@ def _register_mcp_readiness_api(
 
         async def async_call(self, hass, tool_input, llm_context):
             await _require_admin(hass, llm_context, "control:read")
-            arguments = tool_input.tool_args
-            query = arguments["query"].strip()
+            arguments = _strict_args(tool_input, {"query"}, {"limit"})
+            raw_query = arguments["query"]
+            query = raw_query.strip() if isinstance(raw_query, str) else ""
             if not 1 <= len(query) <= 80:
                 raise HomeAssistantError("Search query must contain 1-80 characters")
+            limit = arguments.get("limit", 10)
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+                raise HomeAssistantError("Limit must be an integer from 1 to 20")
             return llm.ToolResult(data=search_entities(hass, {
-                "query": query, "limit": arguments.get("limit", 10),
+                "query": query, "limit": limit,
             }))
 
     class StateGetTool(llm.Tool):
@@ -497,8 +529,8 @@ def _register_mcp_readiness_api(
 
         async def async_call(self, hass, tool_input, llm_context):
             await _require_admin(hass, llm_context, "control:read")
-            ids = tool_input.tool_args["entity_ids"]
-            if not 1 <= len(ids) <= 20 or any(
+            ids = _strict_args(tool_input, {"entity_ids"}, set())["entity_ids"]
+            if not isinstance(ids, list) or not 1 <= len(ids) <= 20 or any(
                 not isinstance(item, str) or len(item) > 150 or item.count(".") != 1
                 for item in ids
             ):
@@ -531,22 +563,65 @@ def _register_mcp_readiness_api(
         hass, ReadinessAPI(
             hass=hass, id=f"{DOMAIN}-readiness",
             name="One Bridge (experimental read-only)",
+            # Defense in depth: Home Assistant's own authorization helper also
+            # rejects non-admin users before One Bridge's ACL runs.
+            requires_admin=True,
         ),
     )
+
+
+def _mcp_wanted(engine: SuiteBridgeEngine, entry: ConfigEntry) -> bool:
+    """Return True only for an explicit opt-in on an enabled target bridge."""
+    # Deliberate default-off: never activate MCP merely by upgrading.
+    if entry.options.get("mcp_enabled", False) is not True:
+        return False
+    bridge = engine.config
+    return bool(
+        bridge.enabled
+        and bridge.role == "target"
+        and "status:read" in bridge.capabilities
+    )
+
+
+def _sync_mcp_registration(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Register or unregister only the MCP LLM API to match live options.
+
+    This runs without reloading the config entry, so toggling MCP never
+    requires a Home Assistant restart and never touches the HTTP views,
+    OAuth, stores or GPT Action endpoints.
+    """
+    data = hass.data.get(DOMAIN)
+    if not isinstance(data, dict) or data.get("engine") is None:
+        return
+    registrations: dict[str, Any] = data.setdefault("mcp_unregister", {})
+    current = registrations.get(entry.entry_id)
+    if _mcp_wanted(data["engine"], entry):
+        if current is None:
+            registrations[entry.entry_id] = _register_mcp_readiness_api(
+                hass, data["engine"], entry
+            )
+    elif current is not None:
+        registrations.pop(entry.entry_id)()
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    _sync_mcp_registration(hass, entry)
+
+
+def _unregister_mcp(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    data = hass.data.get(DOMAIN)
+    if not isinstance(data, dict):
+        return
+    unregister = (data.get("mcp_unregister") or {}).pop(entry.entry_id, None)
+    if unregister is not None:
+        unregister()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not await _async_initialize(hass):
         return False
-    # Deliberate default-off. A later target options-flow change will expose
-    # this switch; never activate MCP merely by upgrading the public component.
-    if entry.options.get("mcp_enabled", False) is not True:
-        return True
-    engine = hass.data[DOMAIN]["engine"]
-    bridge = engine.config
-    if not bridge.enabled or bridge.role != "target" or "status:read" not in bridge.capabilities:
-        return True
-    entry.async_on_unload(_register_mcp_readiness_api(hass, engine, entry))
+    _sync_mcp_registration(hass, entry)
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
 
 
@@ -555,6 +630,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # client are module-level singletons registered against hass; returning True
     # would leave dangling routes/stores behind. HA treats False as
     # "unload unsupported", so reloads surface an explicit error instead of a
-    # half-torn-down integration.
-    del hass, entry
+    # half-torn-down integration. The MCP API is the exception: fail closed by
+    # removing it whenever an unload is attempted.
+    _unregister_mcp(hass, entry)
     return False
