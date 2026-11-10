@@ -22,6 +22,8 @@ from .mail_ops import (
     mail_accounts,
     mail_folders,
     mail_get,
+    mail_attachment_get,
+    mail_attachment_text,
     mail_search,
     mail_sent_folder_status,
     normalize_sent_fallback_address,
@@ -38,6 +40,8 @@ _MAIL_OPERATIONS = frozenset(
         "mail.folders",
         "mail.search",
         "mail.get",
+        "mail.attachment.get",
+        "mail.attachment.text",
         "mail.sent_folder_status",
         "change.prepare.mail_send",
         "change.prepare.mail_settings",
@@ -46,10 +50,16 @@ _MAIL_OPERATIONS = frozenset(
 )
 
 
+# Read once at import time. Home Assistant imports custom integrations in an
+# executor thread, so this keeps the blocking file read out of the event loop
+# (activate_mail_feature runs inside async_setup_entry).
+_MAIL_CONTRACT_DOCUMENT = json.loads(
+    Path(__file__).with_name("mail_operations.v2.json").read_text(encoding="utf-8")
+)
+
+
 def _load_mail_contract() -> OperationCatalog:
-    path = Path(__file__).with_name("mail_operations.v2.json")
-    document = json.loads(path.read_text(encoding="utf-8"))
-    return OperationCatalog(document)
+    return OperationCatalog(deepcopy(_MAIL_CONTRACT_DOCUMENT))
 
 
 def _extend_catalog(catalog: OperationCatalog) -> None:
@@ -129,6 +139,10 @@ def _patch_engine_class(engine_cls: type[Any], engine_module: Any) -> None:
             result = await mail_search(self.hass, arguments)
         elif operation == "mail.get":
             result = await mail_get(self.hass, arguments)
+        elif operation == "mail.attachment.text":
+            result = await mail_attachment_text(self.hass, arguments)
+        elif operation == "mail.attachment.get":
+            result = await mail_attachment_get(self.hass, arguments)
         elif operation == "mail.sent_folder_status":
             result = await mail_sent_folder_status(self.hass, arguments)
         elif operation == "change.prepare.mail_send":

@@ -13,10 +13,10 @@ from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from email.utils import format_datetime, formataddr, make_msgid, parseaddr
 from html.parser import HTMLParser
+import aiosmtplib
 import hashlib
 import imaplib
 import re
-import smtplib
 import ssl
 from datetime import datetime, timezone
 from typing import Any
@@ -563,6 +563,89 @@ async def mail_get(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _attachment_sync(entry: Any, folder: str, uid: str, index: int, offset: int, length: int) -> dict[str, Any]:
+    """Read a bounded PDF attachment chunk without marking the message Seen."""
+    import base64
+
+    client = _imap_connect(entry)
+    try:
+        _select_folder(client, folder)
+        status, data = client.uid("fetch", uid, "(BODY.PEEK[] RFC822.SIZE)")
+        if status != "OK" or not data:
+            raise SuiteBridgeError("MAIL_MESSAGE_NOT_FOUND", "Mailen blev ikke fundet.", 404)
+        raw = next((item[1] for item in data if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes)), None)
+        if raw is None or len(raw) > 12_000_000:
+            raise SuiteBridgeError("MAIL_MESSAGE_TOO_LARGE", "Mailen mangler eller er for stor.", 413)
+        message = BytesParser(policy=policy.default).parsebytes(raw)
+        parts = [part for part in message.walk() if part.get_filename() or part.get_content_disposition() == "attachment"]
+        if index >= len(parts):
+            raise SuiteBridgeError("MAIL_ATTACHMENT_NOT_FOUND", "Vedhæftningen blev ikke fundet.", 404)
+        part = parts[index]
+        filename = _decode_header(part.get_filename())
+        payload = part.get_payload(decode=True)
+        if not isinstance(payload, bytes) or len(payload) > 8_000_000 or not filename.lower().endswith(".pdf") or part.get_content_type() != "application/pdf" or not payload.startswith(b"%PDF-"):
+            raise SuiteBridgeError("MAIL_ATTACHMENT_INVALID", "Kun PDF-vedhæftninger på højst 8 MB tillades.", 422)
+        chunk = payload[offset:offset + length]
+        return {"uid": uid, "folder": folder, "attachment_index": index, "filename": filename, "content_type": "application/pdf", "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(), "offset": offset, "length": len(chunk), "base64": base64.b64encode(chunk).decode("ascii"), "has_more": offset + length < len(payload)}
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
+async def mail_attachment_get(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    entry = _entry(hass, arguments["imap_entry_id"], "imap")
+    uid = str(arguments["uid"])
+    if not uid.isdecimal() or int(uid) < 1:
+        raise SuiteBridgeError("MAIL_UID_INVALID", "UID skal være et positivt heltal.", 422)
+    return await hass.async_add_executor_job(_attachment_sync, entry, str(arguments.get("folder") or "INBOX"), uid, int(arguments["attachment_index"]), int(arguments.get("offset", 0)), int(arguments.get("length", 24000)))
+
+
+def _attachment_text_sync(entry: Any, folder: str, uid: str, index: int, page: int, max_chars: int) -> dict[str, Any]:
+    from io import BytesIO
+    from pypdf import PdfReader
+    client = _imap_connect(entry)
+    try:
+        _select_folder(client, folder)
+        status, data = client.uid("fetch", uid, "(BODY.PEEK[] RFC822.SIZE)")
+        if status != "OK" or not data:
+            raise SuiteBridgeError("MAIL_MESSAGE_NOT_FOUND", "Mailen blev ikke fundet.", 404)
+        raw = next((item[1] for item in data if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes)), None)
+        if raw is None or len(raw) > 12_000_000:
+            raise SuiteBridgeError("MAIL_MESSAGE_TOO_LARGE", "Mailen mangler eller er for stor.", 413)
+        message = BytesParser(policy=policy.default).parsebytes(raw)
+        parts = [part for part in message.walk() if part.get_filename() or part.get_content_disposition() == "attachment"]
+        if index >= len(parts):
+            raise SuiteBridgeError("MAIL_ATTACHMENT_NOT_FOUND", "Vedhæftningen blev ikke fundet.", 404)
+        part = parts[index]
+        payload = part.get_payload(decode=True)
+        filename = _decode_header(part.get_filename())
+        if not isinstance(payload, bytes) or len(payload) > 8_000_000 or not filename.lower().endswith(".pdf") or part.get_content_type() != "application/pdf" or not payload.startswith(b"%PDF-"):
+            raise SuiteBridgeError("MAIL_ATTACHMENT_INVALID", "Kun PDF-vedhæftninger på højst 8 MB tillades.", 422)
+        try:
+            reader = PdfReader(BytesIO(payload), strict=False)
+            count = len(reader.pages)
+            if count > 100 or page >= count:
+                raise SuiteBridgeError("MAIL_PDF_PAGE_INVALID", "PDF-siden findes ikke eller PDF har over 100 sider.", 422)
+            extracted = reader.pages[page].extract_text() or ""
+        except SuiteBridgeError:
+            raise
+        except Exception as err:
+            raise SuiteBridgeError("MAIL_PDF_TEXT_FAILED", "PDF-tekst kunne ikke udtrækkes.", 422) from err
+        return {"uid": uid, "folder": folder, "attachment_index": index, "filename": filename, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(), "page": page, "page_count": count, "text": extracted[:max_chars], "text_truncated": len(extracted) > max_chars, "extracted_chars": len(extracted), "security_notice": _UNTRUSTED_NOTICE}
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
+async def mail_attachment_text(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    entry = _entry(hass, arguments["imap_entry_id"], "imap")
+    return await hass.async_add_executor_job(_attachment_text_sync, entry, str(arguments.get("folder") or "INBOX"), str(arguments["uid"]), int(arguments["attachment_index"]), int(arguments.get("page", 0)), int(arguments.get("max_chars", 16000)))
+
+
 def _validate_address(value: str) -> str:
     text = str(value or "").strip()
     if "\r" in text or "\n" in text or not _EMAIL_RE.fullmatch(text):
@@ -867,21 +950,23 @@ async def prepare_mail_send(hass: Any, arguments: dict[str, Any]) -> tuple[dict[
     return material, normalized
 
 
-def _smtp_send_sync(entry: Any, sender: str, recipients: list[str], raw: bytes) -> dict[str, Any]:
+async def _smtp_send_async(entry: Any, sender: str, recipients: list[str], raw: bytes) -> dict[str, Any]:
+    """Send through Home Assistant's asynchronous SMTP client in the event loop."""
     runtime = getattr(entry, "runtime_data", None)
-    if runtime is None or not hasattr(runtime, "connect"):
+    if runtime is None or not hasattr(runtime, "__aenter__") or not hasattr(runtime, "sendmail"):
         raise SuiteBridgeError(
             "MAIL_SMTP_NOT_READY",
             "SMTP integrationen er ikke klar til afsendelse.",
             409,
+            details={"outcome": "not_applied"},
         )
-    connection = None
     try:
-        connection = runtime.connect()
-        refused = connection.sendmail(sender, recipients, raw)
+        async with runtime as connection:
+            # aiosmtplib returns (refused_recipients, server_response).
+            refused, _response = await connection.sendmail(sender, recipients, raw)
         accepted = [address for address in recipients if address not in refused]
         return {"accepted": accepted, "refused": sorted(refused)}
-    except smtplib.SMTPRecipientsRefused as err:
+    except aiosmtplib.SMTPRecipientsRefused as err:
         raise SuiteBridgeError(
             "MAIL_RECIPIENTS_REFUSED",
             "SMTP-serveren afviste alle modtagere.",
@@ -889,11 +974,11 @@ def _smtp_send_sync(entry: Any, sender: str, recipients: list[str], raw: bytes) 
             details={"outcome": "not_applied"},
         ) from err
     except (
-        smtplib.SMTPAuthenticationError,
-        smtplib.SMTPConnectError,
-        smtplib.SMTPHeloError,
-        smtplib.SMTPNotSupportedError,
-        smtplib.SMTPDataError,
+        aiosmtplib.SMTPAuthenticationError,
+        aiosmtplib.SMTPHeloError,
+        aiosmtplib.SMTPNotSupported,
+        aiosmtplib.SMTPSenderRefused,
+        aiosmtplib.SMTPDataError,
     ) as err:
         raise SuiteBridgeError(
             "MAIL_SMTP_REJECTED",
@@ -901,19 +986,27 @@ def _smtp_send_sync(entry: Any, sender: str, recipients: list[str], raw: bytes) 
             502,
             details={"outcome": "not_applied"},
         ) from err
-    except (smtplib.SMTPServerDisconnected, OSError, TimeoutError) as err:
+    except (
+        aiosmtplib.SMTPServerDisconnected,
+        aiosmtplib.SMTPTimeoutError,
+        aiosmtplib.SMTPConnectError,
+        OSError,
+        TimeoutError,
+    ) as err:
         raise SuiteBridgeError(
             "MAIL_SMTP_OUTCOME_UNKNOWN",
             "SMTP-forbindelsen forsvandt under afsendelsen; udfaldet er ukendt.",
             502,
             details={"outcome": "unknown"},
         ) from err
-    finally:
-        if connection is not None:
-            try:
-                connection.quit()
-            except Exception:
-                pass
+    except aiosmtplib.SMTPException as err:
+        # A generic transport failure cannot prove whether delivery occurred.
+        raise SuiteBridgeError(
+            "MAIL_SMTP_OUTCOME_UNKNOWN",
+            "SMTP-afsendelsen fejlede, og udfaldet kan ikke fastslås.",
+            502,
+            details={"outcome": "unknown"},
+        ) from err
 
 
 def _append_sent_sync(entry: Any, folder: str, raw: bytes) -> None:
@@ -982,8 +1075,7 @@ async def apply_mail_send(hass: Any, material: dict[str, Any]) -> dict[str, Any]
             409,
             details={"outcome": "not_applied"},
         )
-    smtp_result = await hass.async_add_executor_job(
-        _smtp_send_sync,
+    smtp_result = await _smtp_send_async(
         smtp_entry,
         material["from"],
         list(material["recipients"]),
@@ -1035,8 +1127,7 @@ async def apply_mail_send(hass: Any, material: dict[str, Any]) -> dict[str, Any]
             fallback_copy_error = "MAIL_FALLBACK_RECIPIENT_REFUSED"
         else:
             try:
-                fallback_result = await hass.async_add_executor_job(
-                    _smtp_send_sync,
+                fallback_result = await _smtp_send_async(
                     smtp_entry,
                     material["from"],
                     [fallback_address],

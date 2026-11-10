@@ -1,5 +1,5 @@
 {
-  "schema_version": "2.3.1",
+  "schema_version": "2.3.7",
   "catalog_version": 2,
   "public_routes": {
     "dispatch": {
@@ -687,7 +687,8 @@
             ]
           },
           "query": {
-            "type": "string"
+            "type": "string",
+            "description": "Matcher ved ordstart i værdier (entity_id, navn osv.); sensor. finder ikke binary_sensor."
           },
           "limit": {
             "type": "integer",

@@ -77,7 +77,15 @@ async def async_ws_command(
     hass: HomeAssistant,
     refresh_token_id: str,
     command: dict[str, Any],
+    *,
+    expect_event: bool = False,
 ) -> Any:
+    """Run one internal WS command.
+
+    Subscription commands (such as ``render_template``) answer with an empty
+    result first and deliver the value in a following event; pass
+    ``expect_event=True`` to return that first event payload instead.
+    """
     refresh_token = hass.auth.async_get_refresh_token(refresh_token_id)
     if refresh_token is None:
         raise SuiteBridgeError("OAUTH_SESSION_NOT_FOUND", "OAuth-sessionen findes ikke.", 401)
@@ -108,7 +116,11 @@ async def async_ws_command(
                     if reply.type != WSMsgType.TEXT:
                         continue
                     payload = reply.json()
-                    if payload.get("id") != 1 or payload.get("type") != "result":
+                    if payload.get("id") != 1:
+                        continue
+                    if payload.get("type") == "event" and expect_event:
+                        return payload.get("event")
+                    if payload.get("type") != "result":
                         continue
                     if not payload.get("success"):
                         error = payload.get("error") or {}
@@ -117,6 +129,8 @@ async def async_ws_command(
                             f"{error.get('code', 'unknown')}: {error.get('message', 'Ukendt fejl')}",
                             400,
                         )
+                    if expect_event:
+                        continue
                     return payload.get("result")
     except TimeoutError as err:
         raise SuiteBridgeError("INTERNAL_WS_TIMEOUT", "Intern Home Assistant WebSocket timed out.", 504) from err

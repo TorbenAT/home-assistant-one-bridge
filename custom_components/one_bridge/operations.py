@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -78,10 +81,20 @@ async def logbook(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[st
 
 async def template_render(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     try:
-        result = await async_ws_command(hass, auth_id, {"type": "render_template", "template": arguments["template"]})
+        # render_template is a subscription: the result frame is empty and the
+        # rendered value arrives in the first event (or an error event).
+        event = await async_ws_command(
+            hass,
+            auth_id,
+            {"type": "render_template", "template": arguments["template"], "report_errors": True},
+            expect_event=True,
+        )
     except SuiteBridgeError as err:
         return {"rendered": None, "available": False, "upstream_error": err.code}
-    return {"rendered": result, "available": True}
+    event = event if isinstance(event, dict) else {}
+    if "error" in event and "result" not in event:
+        return {"rendered": None, "available": True, "template_error": redact_text(str(event.get("error")))}
+    return {"rendered": event.get("result"), "available": True}
 
 
 async def calendar_events(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -170,7 +183,47 @@ def _registry_for(hass: Any, registry: str) -> Any:
     return factories[registry](hass)
 
 
+_REGISTRY_ACCESSORS = {
+    # Home Assistant registries have no common "list everything" method.
+    # entities is an id->entry mapping; devices iterates entries directly
+    # (using it as a mapping is deprecated from HA 2026.11).
+    "entity": lambda registry: registry.entities.values(),
+    "device": lambda registry: registry.devices,
+    "area": lambda registry: registry.async_list_areas(),
+    "floor": lambda registry: registry.async_list_floors(),
+    "label": lambda registry: registry.async_list_labels(),
+}
+
+
+def _registry_items(registry: Any, name: str) -> list[Any]:
+    return list(_REGISTRY_ACCESSORS[name](registry))
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (set, frozenset, tuple)):
+        return sorted(value, key=str) if isinstance(value, (set, frozenset)) else list(value)
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None and isinstance(enum_value, (str, int, float, bool)):
+        return enum_value
+    return str(value)
+
+
+def _string_values(data: Any) -> list[str]:
+    if isinstance(data, str):
+        return [data.casefold()]
+    if isinstance(data, dict):
+        return [text for value in data.values() for text in _string_values(value)]
+    if isinstance(data, list):
+        return [text for value in data for text in _string_values(value)]
+    return []
+
+
 def _registry_item(item: Any) -> dict[str, Any]:
+    # Registry entries carry datetimes, enums and sets; return plain JSON.
+    return json.loads(json.dumps(_registry_item_raw(item), default=_json_default))
+
+
+def _registry_item_raw(item: Any) -> dict[str, Any]:
     for attr in ("extended_dict", "dict_repr"):
         try:
             value = getattr(item, attr, None)
@@ -194,11 +247,18 @@ def _registry_item(item: Any) -> dict[str, Any]:
     try:
         return {key: value for key, value in vars(item).items() if not key.startswith("_")}
     except (TypeError, AttributeError):
-        try:
-            item_id = getattr(item, "id", "")
-        except Exception:
-            item_id = ""
-        return {"id": str(item_id)}
+        pass
+    if dataclasses.is_dataclass(item):
+        return {
+            field.name: getattr(item, field.name)
+            for field in dataclasses.fields(item)
+            if not field.name.startswith("_")
+        }
+    try:
+        item_id = getattr(item, "id", "")
+    except Exception:
+        item_id = ""
+    return {"id": str(item_id)}
 
 
 async def registry_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -206,15 +266,12 @@ async def registry_list(hass: Any, auth_id: str, arguments: dict[str, Any]) -> d
     registry = _registry_for(hass, arguments["registry"])
     query = str(arguments.get("query") or "").casefold()
     entries = []
-    try:
-        items = registry.async_items()
-    except Exception:
-        items = ()
-    if isinstance(items, dict):
-        items = items.values()
-    for item in items:
+    # Match at the start of a word in any value, so "sensor." finds sensor.x
+    # but not binary_sensor.x, and "køkken" still finds "Lampe køkken".
+    pattern = re.compile(r"(?<!\w)" + re.escape(query)) if query else None
+    for item in _registry_items(registry, arguments["registry"]):
         data = _registry_item(item)
-        if query and query not in str(data).casefold():
+        if pattern and not any(pattern.search(value) for value in _string_values(data)):
             continue
         entries.append(data)
         # Contract alignment: ha.registry.list caps limit at 200.

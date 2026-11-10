@@ -23,8 +23,12 @@ from homeassistant.helpers.selector import (
 )
 
 from .config import (
+    CALLBACK_GPT_ACTION,
+    CALLBACK_MCP_CONNECTOR,
     BridgeConfig,
     async_load_config,
+    callback_kind,
+    callbacks_of_kind,
     resolve_allowed_capabilities,
     resolve_raw_permissions,
     setup_access_token,
@@ -108,6 +112,21 @@ def _callback(value: Any) -> str:
     ):
         raise ValueError("callback")
     return text
+
+
+def _mcp_callback(value: Any) -> str:
+    raw = str(value or "").strip()
+    try:
+        if callback_kind(raw) != CALLBACK_MCP_CONNECTOR:
+            raise ValueError("mcp_callback")
+    except ValueError as err:
+        raise ValueError("mcp_callback") from err
+    return raw
+
+
+def _first_callback(raw: dict[str, Any], kind: str) -> str:
+    found = callbacks_of_kind(raw.get("allowed_redirect_uris") or [], kind)
+    return found[0] if found else ""
 
 
 def _internal_ws(value: Any) -> str:
@@ -315,8 +334,7 @@ def _setup_placeholders(raw: dict[str, Any], client_secret: str | None) -> dict[
     base = str(raw.get("public_base_url", "")).rstrip("/")
     access = setup_access_token(str(raw.get("client_secret_sha256", "")))
     suffix = f"?token={access}" if access else ""
-    callbacks = raw.get("allowed_redirect_uris") or []
-    callback_url = str(callbacks[0]) if callbacks else "Not configured yet — add the callback shown by the GPT editor in One Bridge Options."
+    callback_url = _first_callback(raw, CALLBACK_GPT_ACTION) or "Not configured yet — add the callback shown by the GPT editor in One Bridge Options."
     preset, allowed = resolve_raw_permissions(raw)
     return {
         "client_id": str(raw.get("oauth_client_id", "")),
@@ -549,6 +567,10 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
             try:
                 signature_options = _mail_signature_options(user_input)
                 self._pending_signature_options = signature_options
+                # MCP is an explicit, target-only opt-in; do not modify OAuth.
+                self._pending_mcp_enabled = (
+                    role == "target" and user_input.get("mcp_enabled") is True
+                )
                 updated = dict(raw)
                 updated.update(
                     {
@@ -561,7 +583,22 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                     }
                 )
                 callback_value = str(user_input.get("callback_url", "")).strip()
-                updated["allowed_redirect_uris"] = [_callback(callback_value)] if callback_value else []
+                mcp_callback_value = str(user_input.get("mcp_callback_url", "")).strip()
+                updated["allowed_redirect_uris"] = (
+                    ([_callback(callback_value)] if callback_value else [])
+                    + ([_mcp_callback(mcp_callback_value)] if mcp_callback_value else [])
+                )
+                # Bridge-hosted ChatGPT MCP endpoint: explicit opt-in, any role.
+                # It reuses the same OAuth client and capability policy.
+                if user_input.get("mcp_endpoint_enabled") is True:
+                    updated["mcp_endpoint_enabled"] = True
+                else:
+                    updated.pop("mcp_endpoint_enabled", None)
+                # Source role only: allow bridge deployment/cleanup via MCP.
+                if role == "source" and user_input.get("mcp_deployment_enabled") is True:
+                    updated["mcp_deployment_enabled"] = True
+                else:
+                    updated.pop("mcp_deployment_enabled", None)
                 preset = str(user_input.get("permission_preset", current_preset))
                 rotate_secret = bool(user_input.get("rotate_client_secret", False))
                 if preset == "custom":
@@ -579,10 +616,11 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                 return await self._stage_and_show_setup(raw, updated, rotate_secret)
             except ValueError:
                 errors["base"] = "invalid_options"
-        callbacks = raw.get("allowed_redirect_uris") or [""]
         schema = vol.Schema(
             {
-                vol.Optional("callback_url", default=str(callbacks[0])): str,
+                vol.Optional("callback_url", default=_first_callback(raw, CALLBACK_GPT_ACTION)): str,
+                vol.Optional("mcp_callback_url", default=_first_callback(raw, CALLBACK_MCP_CONNECTOR)): str,
+                vol.Required("mcp_endpoint_enabled", default=raw.get("mcp_endpoint_enabled") is True): bool,
                 vol.Required("permission_preset", default=current_preset): _preset_selector(),
                 vol.Required("require_admin", default=bool(raw.get("require_admin", True))): bool,
                 vol.Required("require_owner", default=bool(raw.get("require_owner", False))): bool,
@@ -616,6 +654,20 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                 ): str,
             }
         )
+        if role == "source":
+            schema = schema.extend({
+                vol.Required(
+                    "mcp_deployment_enabled",
+                    default=raw.get("mcp_deployment_enabled") is True,
+                ): bool,
+            })
+        if role == "target":
+            schema = schema.extend({
+                vol.Required(
+                    "mcp_enabled",
+                    default=entry_options.get("mcp_enabled") is True,
+                ): bool,
+            })
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 
     async def async_step_capabilities(self, user_input=None):
@@ -669,8 +721,15 @@ class OneBridgeOptionsFlow(config_entries.OptionsFlow):
                 options.update(
                     {
                         "permission_preset": raw.get("permission_preset"),
-                        "callback_url": (raw.get("allowed_redirect_uris") or [""])[0],
+                        "callback_url": _first_callback(raw, CALLBACK_GPT_ACTION),
+                        "mcp_callback_url": _first_callback(raw, CALLBACK_MCP_CONNECTOR),
+                        "mcp_endpoint_enabled": raw.get("mcp_endpoint_enabled") is True,
+                        "mcp_deployment_enabled": raw.get("mcp_deployment_enabled") is True,
                         "read_only_lockdown": bool(raw.get("read_only_lockdown", False)),
+                        "mcp_enabled": bool(
+                            raw.get("role") == "target"
+                            and getattr(self, "_pending_mcp_enabled", False)
+                        ),
                     }
                 )
                 return self.async_create_entry(title="", data=options)
