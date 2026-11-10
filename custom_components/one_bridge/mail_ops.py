@@ -13,10 +13,10 @@ from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from email.utils import format_datetime, formataddr, make_msgid, parseaddr
 from html.parser import HTMLParser
+import aiosmtplib
 import hashlib
 import imaplib
 import re
-import smtplib
 import ssl
 from datetime import datetime, timezone
 from typing import Any
@@ -950,21 +950,23 @@ async def prepare_mail_send(hass: Any, arguments: dict[str, Any]) -> tuple[dict[
     return material, normalized
 
 
-def _smtp_send_sync(entry: Any, sender: str, recipients: list[str], raw: bytes) -> dict[str, Any]:
+async def _smtp_send_async(entry: Any, sender: str, recipients: list[str], raw: bytes) -> dict[str, Any]:
+    """Send through Home Assistant's asynchronous SMTP client in the event loop."""
     runtime = getattr(entry, "runtime_data", None)
-    if runtime is None or not hasattr(runtime, "connect"):
+    if runtime is None or not hasattr(runtime, "__aenter__") or not hasattr(runtime, "sendmail"):
         raise SuiteBridgeError(
             "MAIL_SMTP_NOT_READY",
             "SMTP integrationen er ikke klar til afsendelse.",
             409,
+            details={"outcome": "not_applied"},
         )
-    connection = None
     try:
-        connection = runtime.connect()
-        refused = connection.sendmail(sender, recipients, raw)
+        async with runtime as connection:
+            # aiosmtplib returns (refused_recipients, server_response).
+            refused, _response = await connection.sendmail(sender, recipients, raw)
         accepted = [address for address in recipients if address not in refused]
         return {"accepted": accepted, "refused": sorted(refused)}
-    except smtplib.SMTPRecipientsRefused as err:
+    except aiosmtplib.SMTPRecipientsRefused as err:
         raise SuiteBridgeError(
             "MAIL_RECIPIENTS_REFUSED",
             "SMTP-serveren afviste alle modtagere.",
@@ -972,11 +974,11 @@ def _smtp_send_sync(entry: Any, sender: str, recipients: list[str], raw: bytes) 
             details={"outcome": "not_applied"},
         ) from err
     except (
-        smtplib.SMTPAuthenticationError,
-        smtplib.SMTPConnectError,
-        smtplib.SMTPHeloError,
-        smtplib.SMTPNotSupportedError,
-        smtplib.SMTPDataError,
+        aiosmtplib.SMTPAuthenticationError,
+        aiosmtplib.SMTPHeloError,
+        aiosmtplib.SMTPNotSupported,
+        aiosmtplib.SMTPSenderRefused,
+        aiosmtplib.SMTPDataError,
     ) as err:
         raise SuiteBridgeError(
             "MAIL_SMTP_REJECTED",
@@ -984,19 +986,27 @@ def _smtp_send_sync(entry: Any, sender: str, recipients: list[str], raw: bytes) 
             502,
             details={"outcome": "not_applied"},
         ) from err
-    except (smtplib.SMTPServerDisconnected, OSError, TimeoutError) as err:
+    except (
+        aiosmtplib.SMTPServerDisconnected,
+        aiosmtplib.SMTPTimeoutError,
+        aiosmtplib.SMTPConnectError,
+        OSError,
+        TimeoutError,
+    ) as err:
         raise SuiteBridgeError(
             "MAIL_SMTP_OUTCOME_UNKNOWN",
             "SMTP-forbindelsen forsvandt under afsendelsen; udfaldet er ukendt.",
             502,
             details={"outcome": "unknown"},
         ) from err
-    finally:
-        if connection is not None:
-            try:
-                connection.quit()
-            except Exception:
-                pass
+    except aiosmtplib.SMTPException as err:
+        # A generic transport failure cannot prove whether delivery occurred.
+        raise SuiteBridgeError(
+            "MAIL_SMTP_OUTCOME_UNKNOWN",
+            "SMTP-afsendelsen fejlede, og udfaldet kan ikke fastslås.",
+            502,
+            details={"outcome": "unknown"},
+        ) from err
 
 
 def _append_sent_sync(entry: Any, folder: str, raw: bytes) -> None:
@@ -1065,8 +1075,7 @@ async def apply_mail_send(hass: Any, material: dict[str, Any]) -> dict[str, Any]
             409,
             details={"outcome": "not_applied"},
         )
-    smtp_result = await hass.async_add_executor_job(
-        _smtp_send_sync,
+    smtp_result = await _smtp_send_async(
         smtp_entry,
         material["from"],
         list(material["recipients"]),
@@ -1118,8 +1127,7 @@ async def apply_mail_send(hass: Any, material: dict[str, Any]) -> dict[str, Any]
             fallback_copy_error = "MAIL_FALLBACK_RECIPIENT_REFUSED"
         else:
             try:
-                fallback_result = await hass.async_add_executor_job(
-                    _smtp_send_sync,
+                fallback_result = await _smtp_send_async(
                     smtp_entry,
                     material["from"],
                     [fallback_address],
